@@ -1,0 +1,14 @@
+{
+    "kdf_settings": {
+        "algorithm": "Argon2id",
+        "iterations": 4,
+        "memory_cost": 65536,
+        "lanes": 4
+    },
+    "algorithm": "AES-256-GCM",
+    "salt": "fedd2260b74e80d36269b4494410e6e0",
+    "nonce": "f5c317e5c48f9073d52ec39b",
+    "original_file": "text.txt",
+    "encrypted_file": "testen.enc",
+    "timestamp": "2025-10-16T23:39:26.140631+00:00"
+}
