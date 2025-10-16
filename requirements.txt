@@ -1,0 +1,8 @@
+#To install: pip install -r requirements.txt
+
+# Core cryptography library that wraps OpenSSL
+cryptography
+
+# Library for password hashing (Argon2), highly recommended for security
+# Argon2 is often included with cryptography, but it is good to explicitly name the dependency
+argon2-cffi

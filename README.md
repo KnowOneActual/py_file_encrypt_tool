@@ -3,7 +3,7 @@
 This tool is currently in the early development phase and is **not stable**. Do not use it for sensitive or critical data until a stable, versioned release is announced. Use at your own risk.
 ***
 
-# Python File Encrypt tool (py_file_encrypt-tool)
+# Python File Encrypt tool (py_file_encrypt_tool)
 
 ![Python](https://img.shields.io/badge/python-3.9+-blue?style=for-the-badge&logo=python)
 ![Crypto](https://img.shields.io/badge/Cryptography-OpenSSL-lightgrey?style=for-the-badge&logo=openssl)
