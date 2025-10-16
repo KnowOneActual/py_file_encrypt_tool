@@ -2,7 +2,6 @@ import argparse
 import sys
 import os
 import json
-# Updated imports for timezone-aware datetime
 from datetime import datetime, timezone 
 from getpass import getpass
 from pathlib import Path
@@ -10,6 +9,8 @@ from pathlib import Path
 # --- Core Cryptography Imports ---
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
+# Import the exception for GCM authentication failure
+from cryptography.exceptions import InvalidTag
 
 # --- Configuration Constants (Secure Defaults / File Format) ---
 FILE_VERSION_HEADER = b"PYENC_V1" 
@@ -18,7 +19,6 @@ REPORT_FILE_SUFFIX = ".report.json"
 AES_KEY_SIZE = 32 # 256 bits for AES-256
 GCM_NONCE_LENGTH = 12
 ARGON2_SALT_LENGTH = 16
-# UPDATED: Security enforcement constant
 MIN_PASSWORD_LENGTH = 8 
 
 # Secure KDF settings (Argon2id default parameters)
@@ -34,20 +34,17 @@ KDF_SETTINGS = {
 def get_verified_password():
     """Prompts the user for a password twice, enforces minimum length, and verifies they match."""
     while True:
-        # Prompt user with updated minimum length requirement
         password = getpass(f"Enter password (min {MIN_PASSWORD_LENGTH} characters): ")
         if not password:
             print("Error: Password cannot be empty.", file=sys.stderr)
             continue
         
-        # Check minimum length
         if len(password) < MIN_PASSWORD_LENGTH:
             print(f"Error: Password must be at least {MIN_PASSWORD_LENGTH} characters long.", file=sys.stderr)
             continue
             
         password_confirm = getpass("Confirm password: ")
         
-        # Verify passwords match
         if password == password_confirm:
             return password
         else:
@@ -71,13 +68,11 @@ def derive_key(password: str, salt: bytes, settings: dict) -> bytes:
 def generate_report(input_file: Path, output_file: Path, report_data: dict):
     """Generates a JSON report detailing the encryption settings."""
     
-    # Determine the report file path (e.g., tests/text.report.json)
     report_path = input_file.with_suffix(REPORT_FILE_SUFFIX)
     
     # Add metadata
     report_data['original_file'] = input_file.name
     report_data['encrypted_file'] = output_file.name
-    # FIX: Use datetime.now(timezone.utc) to resolve DeprecationWarning
     report_data['timestamp'] = datetime.now(timezone.utc).isoformat() 
     
     # Clean up byte values for JSON serialization
@@ -122,7 +117,7 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
     # 3. Initialize the cipher
     aesgcm = AESGCM(key)
     
-    # 4. Read file content and encrypt (using a single read for simplicity)
+    # 4. Read file content and encrypt 
     try:
         with open(input_file, 'rb') as f_in:
             plaintext = f_in.read()
@@ -143,16 +138,9 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
     # 5. Write the final encrypted file
     try:
         with open(output_file, 'wb') as f_out:
-            # Write Header (for file identification)
             f_out.write(FILE_VERSION_HEADER)
-            
-            # Write KDF Metadata (salt)
             f_out.write(salt)
-            
-            # Write Nonce (IV)
             f_out.write(nonce)
-            
-            # Write Ciphertext + Tag
             f_out.write(ciphertext_with_tag)
             
         print(f"Encryption successful. Output: {output_file}")
@@ -163,12 +151,12 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
 
     except Exception as e:
         print(f"Error writing output file: {e}", file=sys.stderr)
-        # IMPORTANT: Clean up partially written file if possible
         if output_file.exists():
             os.remove(output_file)
         return
 
-# ----------------- Decryption Logic Placeholder -----------------
+
+# ----------------- Decryption Logic Implementation -----------------
 
 def decrypt_file(input_path: str, output_path: str, password: str):
     """
@@ -180,16 +168,62 @@ def decrypt_file(input_path: str, output_path: str, password: str):
     if not input_file.name.endswith(ENCRYPTED_FILE_SUFFIX):
         print(f"Error: Decryption file must end with '{ENCRYPTED_FILE_SUFFIX}' suffix.", file=sys.stderr)
         return
-
+        
     if not output_path:
-        # Default output name: remove all suffixes starting from the .enc
         base_name = input_file.name.removesuffix(ENCRYPTED_FILE_SUFFIX)
         output_file = input_file.parent / base_name
     else:
         output_file = Path(output_path)
         
     print(f"Decrypting '{input_file.name}' to '{output_file}'...")
-    print("TODO: Decryption logic needs to be implemented here.")
+    
+    try:
+        with open(input_file, 'rb') as f_in:
+            # 1. Read and verify Header
+            header = f_in.read(len(FILE_VERSION_HEADER))
+            if header != FILE_VERSION_HEADER:
+                print("Error: Invalid file header. This file may be corrupt or not created by this tool.", file=sys.stderr)
+                return
+            
+            # 2. Read Metadata (Salt and Nonce/IV)
+            salt = f_in.read(ARGON2_SALT_LENGTH)
+            nonce = f_in.read(GCM_NONCE_LENGTH)
+            
+            # 3. Read the rest of the file (Ciphertext + Tag)
+            ciphertext_with_tag = f_in.read()
+
+        # NOTE: In a production tool, KDF parameters should be saved in the header.
+        # For this prototype, we re-use the default KDF_SETTINGS.
+        
+        # 4. Derive the key using the password and the stored salt
+        key = derive_key(password, salt, KDF_SETTINGS)
+        aesgcm = AESGCM(key)
+
+        # 5. Decrypt and Authenticate
+        aad = FILE_VERSION_HEADER
+        
+        # If decryption fails (wrong password or file tampering), InvalidTag will be raised
+        plaintext = aesgcm.decrypt(nonce, ciphertext_with_tag, aad)
+
+        # 6. Write the final plaintext file
+        with open(output_file, 'wb') as f_out:
+            f_out.write(plaintext)
+            
+        print(f"Decryption successful. Output: {output_file}")
+    
+    except InvalidTag:
+        # Crucial error handling for security/integrity
+        print("Error: Decryption failed. Incorrect password or the file has been tampered with.", file=sys.stderr)
+        # We don't want to leave a bad output file
+        if output_file.exists():
+            os.remove(output_file)
+        return
+    except FileNotFoundError:
+        print(f"Error: Encrypted file not found at '{input_path}'", file=sys.stderr)
+        return
+    except Exception as e:
+        print(f"An error occurred during decryption: {e}", file=sys.stderr)
+        return
 
 # ----------------------------------------------------------------
 
@@ -249,7 +283,15 @@ def main():
     args = parser.parse_args()
     
     # Get password via the secure, verified function
-    password = get_verified_password()
+    # NOTE: The get_verified_password function ensures we get the password twice for ENCRYPT
+    # and only once for DECRYPT (if we modify it later). For now, it's used for both.
+    password = getpass("Enter password: ") if args.decrypt else get_verified_password()
+    
+    # For decryption, we only ask once for simplicity, but enforce the MIN_PASSWORD_LENGTH
+    if args.decrypt and len(password) < MIN_PASSWORD_LENGTH:
+        print(f"Error: Decryption password must be at least {MIN_PASSWORD_LENGTH} characters long.", file=sys.stderr)
+        sys.exit(1)
+
 
     # Combine KDF settings, mapping the CLI arg values to the function's required internal names
     kdf_settings = KDF_SETTINGS.copy()
@@ -258,10 +300,10 @@ def main():
     kdf_settings['lanes'] = args.kdf_parallelism
 
     if args.encrypt:
-        # Encryption is fully implemented for this prototype stage
         encrypt_file(args.encrypt, args.output, password, kdf_settings)
     elif args.decrypt:
-        # Decryption is the next big step!
+        # NOTE: We currently assume KDF settings match the defaults for decryption. 
+        # This will need to be improved if we allow users to customize KDF settings.
         decrypt_file(args.decrypt, args.output, password)
 
 
