@@ -1,4 +1,3 @@
-
 ***
 ⚠️ **Development Status: Under Active Development** ⚠️
 This tool is currently in the early development phase and is **not stable**. Do not use it for sensitive or critical data until a stable, versioned release is announced. Use at your own risk.
@@ -33,17 +32,17 @@ For advanced users, the tool will include flags to manually select the encryptio
 Developed in **Python**, the tool is designed for reliable use on:
 * **macOS**
 * **Linux**
-* **Windows** (Planned support via standalone executables using PyInstaller for user convenience.)
+* **Windows** (Planned support via standalone executables, possibly using PyInstaller for user convenience.)
 
 ## Getting Started (Planned)
 
 ### Installation
-The tool will require Python 3.9+ and the `cryptography` library.
+The tool requires Python 3.9 or later and the `cryptography` library.
 
 ```bash
 # Clone the repository
-git clone [https://github.com/your-username/secure-cloud-cli.git](https://github.com/your-username/secure-cloud-cli.git)
-cd secure-cloud-cli
+git clone [https://github.com/KnowOneActual/py_file_encrypt_tool.git](https://github.com/py_file_encrypt_tool.git)
+cd py_file_encrypt_tool
 
 # Install dependencies
 pip install -r requirements.txt
@@ -75,10 +74,3 @@ python encrypt_app.py --decrypt my_sensitive_data.pdf.enc
 2.  Implement the core encryption/decryption logic using the Python `cryptography` library.
 3.  Develop the `argparse` structure for the CLI.
 4.  Implement the automatic security report generation.
-
-<!-- end list -->
-
-```
-
-How does `secure-cloud-cli` sound, and are there any immediate changes you'd like to make to the README content?
-```
