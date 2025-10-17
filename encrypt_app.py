@@ -36,7 +36,6 @@ KDF_SETTINGS = {
     'lanes': 4              # Parallelism (threads/lanes)
 }
 
-# --- Helper Functions ---
 
 def get_verified_password():
     """Prompts the user for a password twice, enforces minimum length, and verifies they match."""
@@ -128,7 +127,6 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
             backend=default_backend()
         ).encryptor()
         
-        # We process the AAD first
         aad = FILE_VERSION_HEADER 
         encryptor.authenticate_additional_data(aad)
 
@@ -180,7 +178,6 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
         return
 
 
-# ----------------- Decryption Logic Implementation (Streaming) -----------------
 
 def decrypt_file(input_path: str, output_path: str, password: str):
     """
@@ -297,9 +294,7 @@ def decrypt_file(input_path: str, output_path: str, password: str):
         print(f"An unexpected error occurred during decryption: {e}", file=sys.stderr)
         return
 
-# ----------------------------------------------------------------
 
-# --- Main CLI Logic ---
 
 def main():
     parser = argparse.ArgumentParser(
@@ -327,7 +322,6 @@ def main():
         help='Specify the output file path. Defaults to [INPUT].enc (encrypt) or [INPUT_BASE] (decrypt).'
     )
 
-    # --- Custom Settings (For the advanced user) ---
     custom_settings_group = parser.add_argument_group(
         'Custom KDF Settings (Advanced)', 
         'These settings override the Argon2id parameters for specialized use.'
