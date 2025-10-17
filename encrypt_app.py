@@ -5,12 +5,16 @@ import json
 from datetime import datetime, timezone 
 from getpass import getpass
 from pathlib import Path
+import struct
 
 # --- Core Cryptography Imports ---
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
-# Import the exception for GCM authentication failure
 from cryptography.exceptions import InvalidTag
+# NEW IMPORT FOR STREAMING: Used in encrypt_file and will be used in decrypt_file
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+
 
 # --- Configuration Constants (Secure Defaults / File Format) ---
 FILE_VERSION_HEADER = b"PYENC_V1" 
@@ -20,6 +24,11 @@ AES_KEY_SIZE = 32 # 256 bits for AES-256
 GCM_NONCE_LENGTH = 12
 ARGON2_SALT_LENGTH = 16
 MIN_PASSWORD_LENGTH = 8 
+CHUNK_SIZE = 65536 # 64 KB read/write buffer size for streaming
+
+# Size of the KDF parameters header: 3 unsigned integers (I)
+KDF_HEADER_FORMAT = '<III'
+KDF_HEADER_SIZE = struct.calcsize(KDF_HEADER_FORMAT) # 12 bytes
 
 # Secure KDF settings (Argon2id default parameters)
 KDF_SETTINGS = {
@@ -68,14 +77,13 @@ def derive_key(password: str, salt: bytes, settings: dict) -> bytes:
 def generate_report(input_file: Path, output_file: Path, report_data: dict):
     """Generates a JSON report detailing the encryption settings."""
     
+    # We use input_file as base for the report name since the report relates to the original file
     report_path = input_file.with_suffix(REPORT_FILE_SUFFIX)
     
-    # Add metadata
     report_data['original_file'] = input_file.name
     report_data['encrypted_file'] = output_file.name
     report_data['timestamp'] = datetime.now(timezone.utc).isoformat() 
     
-    # Clean up byte values for JSON serialization
     if isinstance(report_data.get('salt'), bytes):
         report_data['salt'] = report_data['salt'].hex()
     if isinstance(report_data.get('nonce'), bytes):
@@ -91,15 +99,16 @@ def generate_report(input_file: Path, output_file: Path, report_data: dict):
 
 def encrypt_file(input_path: str, output_path: str, password: str, settings: dict):
     """
-    Encrypts the file using AES-256-GCM and the derived key.
-    The output file format is: [HEADER][SALT][NONCE][CIPHERTEXT + TAG]
+    Encrypts the file using AES-256-GCM, streaming data in chunks.
+    The output file format is: [HEADER][KDF_PARAMS][SALT][NONCE][CIPHERTEXT + TAG]
     """
     
-    input_file = Path(input_path)
+    input_file = Path(input_path).resolve()
+    
     if not output_path:
         output_file = input_file.with_suffix(input_file.suffix + ENCRYPTED_FILE_SUFFIX)
     else:
-        output_file = Path(output_path)
+        output_file = Path(output_path).resolve()
 
     print(f"Starting encryption of '{input_file.name}'...")
     
@@ -114,56 +123,75 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
         print(f"Error during key derivation: {e}", file=sys.stderr)
         return
 
-    # 3. Initialize the cipher
-    aesgcm = AESGCM(key)
-    
-    # 4. Read file content and encrypt 
+    # 3. Initialize the streaming cipher object
     try:
-        with open(input_file, 'rb') as f_in:
-            plaintext = f_in.read()
-            
-        # The AAD (Additional Authenticated Data) authenticates the file header
+        # Create the encryptor object
+        encryptor = Cipher(
+            algorithms.AES(key),
+            modes.GCM(nonce),
+            backend=default_backend()
+        ).encryptor()
+        
+        # We process the AAD first
         aad = FILE_VERSION_HEADER 
-        
-        # Encrypt. The result contains the ciphertext AND the 16-byte authentication tag appended.
-        ciphertext_with_tag = aesgcm.encrypt(nonce, plaintext, aad)
-        
-    except FileNotFoundError:
-        print(f"Error: Input file not found at '{input_path}'", file=sys.stderr)
-        return
+        encryptor.authenticate_additional_data(aad)
+
+        # 4. Create the KDF parameter header
+        kdf_params_header = struct.pack(
+            KDF_HEADER_FORMAT,
+            settings['memory_cost'],
+            settings['iterations'],
+            settings['lanes']
+        )
     except Exception as e:
-        print(f"Error during encryption process: {e}", file=sys.stderr)
+        print(f"Error preparing encryption: {e}", file=sys.stderr)
         return
 
-    # 5. Write the final encrypted file
+    # 5. Write the final encrypted file (Header, KDF Params, Salt, Nonce)
     try:
-        with open(output_file, 'wb') as f_out:
+        with open(input_file, 'rb') as f_in, open(output_file, 'wb') as f_out:
             f_out.write(FILE_VERSION_HEADER)
+            f_out.write(kdf_params_header)
             f_out.write(salt)
             f_out.write(nonce)
-            f_out.write(ciphertext_with_tag)
+            
+            # 6. Stream file content and encrypt chunk by chunk
+            while True:
+                chunk = f_in.read(CHUNK_SIZE)
+                if len(chunk) == 0:
+                    break
+                
+                # Encrypt the chunk and write it out
+                f_out.write(encryptor.update(chunk))
+
+            # 7. Finalize the encryption and write the Authentication Tag
+            f_out.write(encryptor.finalize())
+            f_out.write(encryptor.tag) # GCM tag is stored separately
             
         print(f"Encryption successful. Output: {output_file}")
         
-        # 6. Generate Report
+        # 8. Generate Report
         report_data = {'kdf_settings': settings, 'algorithm': 'AES-256-GCM', 'salt': salt, 'nonce': nonce}
         generate_report(input_file, output_file, report_data)
 
+    except FileNotFoundError:
+        print(f"Error: Input file not found at '{input_file}'", file=sys.stderr)
+        return
     except Exception as e:
-        print(f"Error writing output file: {e}", file=sys.stderr)
+        print(f"Error during file streaming: {e}", file=sys.stderr)
         if output_file.exists():
             os.remove(output_file)
         return
 
 
-# ----------------- Decryption Logic Implementation -----------------
-
+# ----------------- Decryption Logic Refactor (To be done) -----------------
+# This function still uses the monolithic read and needs to be refactored for streaming.
 def decrypt_file(input_path: str, output_path: str, password: str):
     """
-    Handles the main decryption logic by reading the header, deriving the key,
-    and decrypting/authenticating the ciphertext.
+    Handles the main decryption logic: reads KDF parameters, derives the key,
+    and decrypts/authenticates the ciphertext.
     """
-    input_file = Path(input_path)
+    input_file = Path(input_path).resolve()
     
     if not input_file.name.endswith(ENCRYPTED_FILE_SUFFIX):
         print(f"Error: Decryption file must end with '{ENCRYPTED_FILE_SUFFIX}' suffix.", file=sys.stderr)
@@ -173,10 +201,11 @@ def decrypt_file(input_path: str, output_path: str, password: str):
         base_name = input_file.name.removesuffix(ENCRYPTED_FILE_SUFFIX)
         output_file = input_file.parent / base_name
     else:
-        output_file = Path(output_path)
+        output_file = Path(output_path).resolve()
         
     print(f"Decrypting '{input_file.name}' to '{output_file}'...")
     
+    # --- Start of Monolithic Read (Needs Refactoring) ---
     try:
         with open(input_file, 'rb') as f_in:
             # 1. Read and verify Header
@@ -185,47 +214,65 @@ def decrypt_file(input_path: str, output_path: str, password: str):
                 print("Error: Invalid file header. This file may be corrupt or not created by this tool.", file=sys.stderr)
                 return
             
-            # 2. Read Metadata (Salt and Nonce/IV)
+            # 2. Read and unpack KDF Parameters
+            kdf_params_header = f_in.read(KDF_HEADER_SIZE)
+            if len(kdf_params_header) != KDF_HEADER_SIZE:
+                print("Error: Encrypted file is incomplete (missing KDF parameters).", file=sys.stderr)
+                return
+
+            memory_cost, iterations, lanes = struct.unpack(KDF_HEADER_FORMAT, kdf_params_header)
+            
+            kdf_settings_from_file = {
+                'algorithm': 'Argon2id',
+                'memory_cost': memory_cost,
+                'iterations': iterations,
+                'lanes': lanes
+            }
+            
+            # 3. Read Metadata (Salt and Nonce/IV)
             salt = f_in.read(ARGON2_SALT_LENGTH)
             nonce = f_in.read(GCM_NONCE_LENGTH)
             
-            # 3. Read the rest of the file (Ciphertext + Tag)
-            ciphertext_with_tag = f_in.read()
+            if len(salt) != ARGON2_SALT_LENGTH or len(nonce) != GCM_NONCE_LENGTH:
+                print("Error: Encrypted file is incomplete (missing salt or nonce).", file=sys.stderr)
+                return
 
-        # NOTE: In a production tool, KDF parameters should be saved in the header.
-        # For this prototype, we re-use the default KDF_SETTINGS.
-        
-        # 4. Derive the key using the password and the stored salt
-        key = derive_key(password, salt, KDF_SETTINGS)
+            # 4. Read the rest of the file (Ciphertext + Tag)
+            ciphertext_with_tag = f_in.read()
+            if not ciphertext_with_tag:
+                 print("Error: Encrypted file contains no data.", file=sys.stderr)
+                 return
+
+        # 5. Derive the key
+        key = derive_key(password, salt, kdf_settings_from_file)
         aesgcm = AESGCM(key)
 
-        # 5. Decrypt and Authenticate
+        # 6. Decrypt and Authenticate
         aad = FILE_VERSION_HEADER
-        
-        # If decryption fails (wrong password or file tampering), InvalidTag will be raised
         plaintext = aesgcm.decrypt(nonce, ciphertext_with_tag, aad)
 
-        # 6. Write the final plaintext file
+        # 7. Write the final plaintext file
         with open(output_file, 'wb') as f_out:
             f_out.write(plaintext)
             
         print(f"Decryption successful. Output: {output_file}")
     
     except InvalidTag:
-        # Crucial error handling for security/integrity
         print("Error: Decryption failed. Incorrect password or the file has been tampered with.", file=sys.stderr)
-        # We don't want to leave a bad output file
         if output_file.exists():
             os.remove(output_file)
         return
     except FileNotFoundError:
-        print(f"Error: Encrypted file not found at '{input_path}'", file=sys.stderr)
+        print(f"Error: Encrypted file not found at '{input_file}'", file=sys.stderr)
+        return
+    except struct.error as e:
+        print(f"Error parsing file header: {e}. File structure may be invalid.", file=sys.stderr)
         return
     except Exception as e:
-        print(f"An error occurred during decryption: {e}", file=sys.stderr)
+        print(f"An unexpected error occurred during decryption: {e}", file=sys.stderr)
         return
+    # --- End of Monolithic Read ---
 
-# ----------------------------------------------------------------
 
 # --- Main CLI Logic ---
 
@@ -282,28 +329,27 @@ def main():
 
     args = parser.parse_args()
     
-    # Get password via the secure, verified function
-    # NOTE: The get_verified_password function ensures we get the password twice for ENCRYPT
-    # and only once for DECRYPT (if we modify it later). For now, it's used for both.
-    password = getpass("Enter password: ") if args.decrypt else get_verified_password()
-    
-    # For decryption, we only ask once for simplicity, but enforce the MIN_PASSWORD_LENGTH
-    if args.decrypt and len(password) < MIN_PASSWORD_LENGTH:
-        print(f"Error: Decryption password must be at least {MIN_PASSWORD_LENGTH} characters long.", file=sys.stderr)
-        sys.exit(1)
+    # Password handling logic
+    if args.encrypt:
+        password = get_verified_password()
+    elif args.decrypt:
+        password = getpass("Enter password: ")
+        if len(password) < MIN_PASSWORD_LENGTH:
+            print(f"Error: Decryption password must be at least {MIN_PASSWORD_LENGTH} characters long.", file=sys.stderr)
+            sys.exit(1)
 
 
-    # Combine KDF settings, mapping the CLI arg values to the function's required internal names
+    # Combine KDF settings
     kdf_settings = KDF_SETTINGS.copy()
     kdf_settings['memory_cost'] = args.kdf_memory
     kdf_settings['iterations'] = args.kdf_time
     kdf_settings['lanes'] = args.kdf_parallelism
 
     if args.encrypt:
+        # Encryption is now streaming
         encrypt_file(args.encrypt, args.output, password, kdf_settings)
     elif args.decrypt:
-        # NOTE: We currently assume KDF settings match the defaults for decryption. 
-        # This will need to be improved if we allow users to customize KDF settings.
+        # Decryption still needs the streaming refactor
         decrypt_file(args.decrypt, args.output, password)
 
 
