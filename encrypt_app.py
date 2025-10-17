@@ -6,15 +6,12 @@ from datetime import datetime, timezone
 from getpass import getpass
 from pathlib import Path
 import struct
-
-# --- Core Cryptography Imports ---
+# NEW IMPORTS FOR STREAMING AND CRYPTO
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 from cryptography.exceptions import InvalidTag
-# NEW IMPORT FOR STREAMING: Used in encrypt_file and will be used in decrypt_file
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
-
 
 # --- Configuration Constants (Secure Defaults / File Format) ---
 FILE_VERSION_HEADER = b"PYENC_V1" 
@@ -22,6 +19,7 @@ ENCRYPTED_FILE_SUFFIX = ".enc"
 REPORT_FILE_SUFFIX = ".report.json"
 AES_KEY_SIZE = 32 # 256 bits for AES-256
 GCM_NONCE_LENGTH = 12
+GCM_TAG_SIZE = 16 # NEW: Added constant for the tag size
 ARGON2_SALT_LENGTH = 16
 MIN_PASSWORD_LENGTH = 8 
 CHUNK_SIZE = 65536 # 64 KB read/write buffer size for streaming
@@ -77,7 +75,6 @@ def derive_key(password: str, salt: bytes, settings: dict) -> bytes:
 def generate_report(input_file: Path, output_file: Path, report_data: dict):
     """Generates a JSON report detailing the encryption settings."""
     
-    # We use input_file as base for the report name since the report relates to the original file
     report_path = input_file.with_suffix(REPORT_FILE_SUFFIX)
     
     report_data['original_file'] = input_file.name
@@ -100,7 +97,7 @@ def generate_report(input_file: Path, output_file: Path, report_data: dict):
 def encrypt_file(input_path: str, output_path: str, password: str, settings: dict):
     """
     Encrypts the file using AES-256-GCM, streaming data in chunks.
-    The output file format is: [HEADER][KDF_PARAMS][SALT][NONCE][CIPHERTEXT + TAG]
+    The output file format is: [HEADER][KDF_PARAMS][SALT][NONCE][CIPHERTEXT][TAG]
     """
     
     input_file = Path(input_path).resolve()
@@ -125,7 +122,6 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
 
     # 3. Initialize the streaming cipher object
     try:
-        # Create the encryptor object
         encryptor = Cipher(
             algorithms.AES(key),
             modes.GCM(nonce),
@@ -147,7 +143,7 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
         print(f"Error preparing encryption: {e}", file=sys.stderr)
         return
 
-    # 5. Write the final encrypted file (Header, KDF Params, Salt, Nonce)
+    # 5. Write the file header components
     try:
         with open(input_file, 'rb') as f_in, open(output_file, 'wb') as f_out:
             f_out.write(FILE_VERSION_HEADER)
@@ -184,12 +180,12 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
         return
 
 
-# ----------------- Decryption Logic Refactor (To be done) -----------------
-# This function still uses the monolithic read and needs to be refactored for streaming.
+# ----------------- Decryption Logic Implementation (Streaming) -----------------
+
 def decrypt_file(input_path: str, output_path: str, password: str):
     """
     Handles the main decryption logic: reads KDF parameters, derives the key,
-    and decrypts/authenticates the ciphertext.
+    and streams the decryption/authentication process.
     """
     input_file = Path(input_path).resolve()
     
@@ -205,7 +201,6 @@ def decrypt_file(input_path: str, output_path: str, password: str):
         
     print(f"Decrypting '{input_file.name}' to '{output_file}'...")
     
-    # --- Start of Monolithic Read (Needs Refactoring) ---
     try:
         with open(input_file, 'rb') as f_in:
             # 1. Read and verify Header
@@ -236,24 +231,54 @@ def decrypt_file(input_path: str, output_path: str, password: str):
             if len(salt) != ARGON2_SALT_LENGTH or len(nonce) != GCM_NONCE_LENGTH:
                 print("Error: Encrypted file is incomplete (missing salt or nonce).", file=sys.stderr)
                 return
-
-            # 4. Read the rest of the file (Ciphertext + Tag)
-            ciphertext_with_tag = f_in.read()
-            if not ciphertext_with_tag:
-                 print("Error: Encrypted file contains no data.", file=sys.stderr)
+            
+            # 4. Derive the key
+            key = derive_key(password, salt, kdf_settings_from_file)
+            
+            # 5. Calculate tag position and read the tag
+            file_size = os.path.getsize(input_file)
+            tag_start_position = file_size - GCM_TAG_SIZE
+            
+            min_size = len(FILE_VERSION_HEADER) + KDF_HEADER_SIZE + ARGON2_SALT_LENGTH + GCM_NONCE_LENGTH + GCM_TAG_SIZE
+            if file_size < min_size:
+                 print("Error: Encrypted file is too small to be a valid container.", file=sys.stderr)
                  return
 
-        # 5. Derive the key
-        key = derive_key(password, salt, kdf_settings_from_file)
-        aesgcm = AESGCM(key)
+            # Read the tag from the end of the file
+            f_in.seek(tag_start_position)
+            tag = f_in.read(GCM_TAG_SIZE)
+            
+            # Go back to the start of the ciphertext
+            start_of_ciphertext = len(FILE_VERSION_HEADER) + KDF_HEADER_SIZE + ARGON2_SALT_LENGTH + GCM_NONCE_LENGTH
+            f_in.seek(start_of_ciphertext) 
 
-        # 6. Decrypt and Authenticate
-        aad = FILE_VERSION_HEADER
-        plaintext = aesgcm.decrypt(nonce, ciphertext_with_tag, aad)
+            # 6. Initialize the streaming decryptor
+            decryptor = Cipher(
+                algorithms.AES(key),
+                modes.GCM(nonce, tag), # Provide the tag to the mode
+                backend=default_backend()
+            ).decryptor()
 
-        # 7. Write the final plaintext file
-        with open(output_file, 'wb') as f_out:
-            f_out.write(plaintext)
+            # Process the AAD first
+            aad = FILE_VERSION_HEADER
+            decryptor.authenticate_additional_data(aad)
+            
+            # 7. Stream file content and decrypt chunk by chunk
+            with open(output_file, 'wb') as f_out:
+                bytes_to_read = tag_start_position - start_of_ciphertext
+                
+                while bytes_to_read > 0:
+                    read_size = min(CHUNK_SIZE, bytes_to_read)
+                    chunk = f_in.read(read_size)
+                    
+                    if not chunk: 
+                        break 
+                        
+                    f_out.write(decryptor.update(chunk))
+                    bytes_to_read -= len(chunk)
+
+                # 8. Finalize the decryption (verifies the tag)
+                f_out.write(decryptor.finalize())
             
         print(f"Decryption successful. Output: {output_file}")
     
@@ -271,8 +296,8 @@ def decrypt_file(input_path: str, output_path: str, password: str):
     except Exception as e:
         print(f"An unexpected error occurred during decryption: {e}", file=sys.stderr)
         return
-    # --- End of Monolithic Read ---
 
+# ----------------------------------------------------------------
 
 # --- Main CLI Logic ---
 
@@ -346,10 +371,8 @@ def main():
     kdf_settings['lanes'] = args.kdf_parallelism
 
     if args.encrypt:
-        # Encryption is now streaming
         encrypt_file(args.encrypt, args.output, password, kdf_settings)
     elif args.decrypt:
-        # Decryption still needs the streaming refactor
         decrypt_file(args.decrypt, args.output, password)
 
 
