@@ -40,14 +40,18 @@ The tool requires Python 3.9+ and the `cryptography` library. It is highly recom
 # Clone the repository
 git clone https://github.com/KnowOneActual/py_file_encrypt_tool.git
 cd secure-cloud-cli
+```
 
 # Create and activate virtual environment
+```bash
 python3 -m venv venv
 source venv/bin/activate  # macOS/Linux
+```
 
 # Install dependencies (ensure cryptography is in requirements.txt)
+```bash
 pip install cryptography
-````
+```
 
 ### Basic Usage (Encrypt - The Easy Button)
 
@@ -72,6 +76,6 @@ python encrypt_app.py --decrypt my_sensitive_data.pdf.enc
 After successful decryption, use the `--verify-report-path` flag to automatically check the decrypted file's integrity against the original hash stored in the report.
 
 ```bash
-python encrypt_app.py --decrypt my_sensitive_data.pdf.enc \
+python encrypt_app.py --decrypt my_sensitive_data.pdf.enc 
 --verify-report-path my_sensitive_data.pdf.report.json
 ```
