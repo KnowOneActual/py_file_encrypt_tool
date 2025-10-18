@@ -1,76 +1,77 @@
-***
-⚠️ **Development Status: Under Active Development** ⚠️
-This tool is currently in the early development phase and is **not stable**. Do not use it for sensitive or critical data until a stable, versioned release is announced. Use at your own risk.
-***
 
-# Python File Encrypt tool (py_file_encrypt_tool)
+# Python File Encrypt CLI tool (py_file_encrypt_tool)
+
+***
+✅ **Development Status: Core Functionality Stable (Beta)** ✅
+The core encryption, decryption, and streaming pipeline is stable and ready for testing.
+***
 
 ![Python](https://img.shields.io/badge/python-3.9+-blue?style=for-the-badge&logo=python)
 ![Crypto](https://img.shields.io/badge/Cryptography-OpenSSL-lightgrey?style=for-the-badge&logo=openssl)
-![Status](https://img.shields.io/badge/Status-Alpha%20(Unstable)-red?style=for-the-badge)
+![Status](https://img.shields.io/badge/Status-Beta-green?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)
 
-A simple, secure, and cross-platform command-line tool for encrypting sensitive data before storing it on a third-party cloud server.
+A simple, secure, and **cross-platform** command-line tool for encrypting sensitive data before storing it on a third-party cloud server.
 
-The primary goal of this tool is to make file encryption easy, transparent, and secure-by-default, enforcing industry best practices while providing an accessible user experience.
+The primary goal of this tool is to make file encryption easy, transparent, and **secure-by-default**, enforcing industry best practices while remaining highly efficient for large data sets.
 
 ## Features
 
 ### 1. Secure Defaults ("The Easy Button")
 The tool uses a simple command to encrypt a file with zero configuration, automatically applying the strongest available settings:
 * **Algorithm:** AES-256 in GCM (Galois/Counter Mode) for authenticated encryption.
-* **Key Derivation:** Argon2id (or a modern, high-iteration PBKDF2) to convert your passphrase into a secure cryptographic key.
-* **Output:** A single, securely packaged file containing the ciphertext, Initialization Vector (IV), and Authentication Tag.
+* **Key Derivation:** Argon2id to convert your passphrase into a secure cryptographic key.
 
-### 2. Transparency and Reporting
-Every encryption operation generates a detailed, human-readable report (e.g., JSON or text file) documenting *exactly* which algorithm, mode, and KDF parameters were used. This provides auditable proof of the security settings.
+### 2. Robustness and Cross-Platform Guarantees
+* **Large File Streaming:** Both encryption and decryption operations are implemented using file streaming, ensuring low memory usage and high performance, regardless of file size.
+* **Cross-Platform KDF Persistence:** Argon2id parameters (memory cost, time cost, parallelism) are automatically embedded in the encrypted file header, guaranteeing that files encrypted with custom settings can be decrypted correctly on any OS (macOS, Linux, Windows).
 
-### 3. Flexible Control
-For advanced users, the tool will include flags to manually select the encryption algorithm, key derivation function, and set parameters like KDF memory and iteration counts.
+### 3. Transparency and Verification
+* **Automatic Checksum:** The tool automatically calculates the **SHA-256 hash** of the original file before encryption and includes it in the final report.
+* **Auditable Report:** Every encryption operation generates a detailed JSON report documenting the algorithm, KDF parameters, salt, and original file hash for auditability.
+* **Verification:** Decryption supports an optional verification mode to automatically compare the decrypted file's hash against the hash recorded in the original report.
 
-### 4. Cross-Platform
-Developed in **Python**, the tool is designed for reliable use on:
-* **macOS**
-* **Linux**
-* **Windows** (Planned support via standalone executables, possibly using PyInstaller for user convenience.)
-
-## Getting Started (Planned)
+## Getting Started
 
 ### Installation
-The tool requires Python 3.9 or later and the `cryptography` library.
+The tool requires Python 3.9+ and the `cryptography` library. It is highly recommended to use a virtual environment.
 
 ```bash
 # Clone the repository
-git clone [https://github.com/KnowOneActual/py_file_encrypt_tool.git](https://github.com/py_file_encrypt_tool.git)
-cd py_file_encrypt_tool
+git clone https://github.com/KnowOneActual/py_file_encrypt_tool.git
+cd secure-cloud-cli
 
-# Install dependencies
-pip install -r requirements.txt
+# Create and activate virtual environment
+python3 -m venv venv
+source venv/bin/activate  # macOS/Linux
+
+# Install dependencies (ensure cryptography is in requirements.txt)
+pip install cryptography
 ````
 
-### Basic Usage (Encrypt)
+### Basic Usage (Encrypt - The Easy Button)
 
-To encrypt a file using the secure defaults:
+Encrypts a file using all secure default settings. You will be prompted for a password (minimum 8 characters) and confirmation.
 
 ```bash
 python encrypt_app.py --encrypt my_sensitive_data.pdf
-# The tool will prompt you for a passphrase.
-# Output will be: my_sensitive_data.pdf.enc and my_sensitive_data.pdf.report.txt
+# Output: my_sensitive_data.pdf.enc and my_sensitive_data.pdf.report.json
 ```
 
 ### Basic Usage (Decrypt)
 
-To decrypt a file:
+Decrypts the file. It will automatically read the KDF settings from the encrypted file header.
 
 ```bash
 python encrypt_app.py --decrypt my_sensitive_data.pdf.enc
-# The tool will prompt you for the passphrase.
-# Output will be: my_sensitive_data.pdf
+# Output: my_sensitive_data.pdf
 ```
 
-## Next Steps
+### Advanced Usage (Decryption with Verification)
 
-1.  Set up the basic file and project structure.
-2.  Implement the core encryption/decryption logic using the Python `cryptography` library.
-3.  Develop the `argparse` structure for the CLI.
-4.  Implement the automatic security report generation.
+After successful decryption, use the `--verify-report-path` flag to automatically check the decrypted file's integrity against the original hash stored in the report.
+
+```bash
+python encrypt_app.py --decrypt my_sensitive_data.pdf.enc \
+--verify-report-path my_sensitive_data.pdf.report.json
+```
