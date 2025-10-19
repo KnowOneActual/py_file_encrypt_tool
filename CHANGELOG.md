@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Non-Cryptographic Integrity Check:** Automatically calculates the **SHA-256 checksum** of the original file during encryption and includes it in the report.
 - **Optional Verification:** Added the `--verify-report-path` flag to automatically verify the decrypted file's hash against the original hash stored in the report.
 - **Decryption Resilience:** Implemented **Atomic Decryption (write-to-temp-then-rename)** to prevent file corruption in case of system failure during the decryption process.
+- **Insecure Override (`--force-insecure-decrypt`):** Included for security demonstration, this highly-warned flag allows bypassing the GCM integrity check to save corrupted data, with the resulting file clearly renamed using the `.unverified_corrupt` suffix.
 
 ### Changed
 - **Large File Support (Streaming):** Refactored both encryption and decryption to use file streaming, enabling low-memory processing of files of arbitrary size.

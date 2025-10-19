@@ -15,10 +15,12 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 from cryptography.exceptions import InvalidTag
 
-# --- Configuration Constants (Secure Defaults / File Format) ---
+# --- Configuration Constants (Updated) ---
 FILE_VERSION_HEADER = b"PYENC_V1" 
 ENCRYPTED_FILE_SUFFIX = ".enc"
 REPORT_FILE_SUFFIX = ".report.json"
+# NEW CORRUPTION CONSTANT
+CORRUPTION_SUFFIX = ".unverified_corrupt" 
 AES_KEY_SIZE = 32 # 256 bits for AES-256
 GCM_NONCE_LENGTH = 12
 GCM_TAG_SIZE = 16 
@@ -40,7 +42,7 @@ KDF_SETTINGS = {
 
 CHECKSUM_ALGORITHM = "SHA-256"
 
-# --- Helper Functions ---
+# --- Helper Functions (Unchanged) ---
 
 def load_original_checksum(report_path: Path) -> tuple[str, str] | None:
     """Reads the original checksum and algorithm from the JSON report."""
@@ -176,7 +178,7 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
         print(f"Error packing KDF parameters: {e}", file=sys.stderr)
         return
         
-    # NEW SECURITY FIX: Expanded AAD includes the entire header
+    # Expanded AAD includes the entire header
     aad = FILE_VERSION_HEADER + kdf_params_header + salt + nonce 
 
     # 4. Initialize streaming cipher object
@@ -234,9 +236,10 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
         return
 
 
-def decrypt_file(input_path: str, output_path: str, password: str, verify_report_path: str | None):
+def decrypt_file(input_path: str, output_path: str, password: str, verify_report_path: str | None, force_insecure: bool):
     """
-    Handles the main decryption logic, using write-to-temp-then-rename for atomic decryption.
+    Handles the main decryption logic, using write-to-temp-then-rename for atomic decryption,
+    with an insecure override option for demonstration purposes.
     """
     input_file = Path(input_path).resolve()
     
@@ -250,10 +253,17 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
     else:
         output_file = Path(output_path).resolve()
         
-    # NEW SECURITY FIX: Atomic Decryption setup
     temp_output_file = output_file.with_suffix(output_file.suffix + '.tmp')
         
     print(f"Decrypting '{input_file.name}' to '{output_file}'...")
+    
+    if force_insecure:
+        print("\n" + "="*80)
+        print("⚠️ ⚠️  SECURITY WARNING: INSECURE DECRYPT MODE ACTIVE ⚠️ ⚠️")
+        print("Integrity check failures (wrong password or tampering) will be ignored,")
+        print("and the unverified, corrupted data will be written to the output file.")
+        print("="*80 + "\n")
+
     
     try:
         # --- File Header Read and Decryption Setup ---
@@ -284,10 +294,10 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
             # 4. Derive the key
             key = derive_key(password, salt, kdf_settings_from_file)
             
-            # NEW SECURITY FIX: Expanded AAD includes the entire header
+            # Expanded AAD includes the entire header
             aad = FILE_VERSION_HEADER + kdf_params_header + salt + nonce
             
-            # 5. Calculate tag position and read the tag
+            # 5. Get tag and set up streaming
             file_size = os.path.getsize(input_file)
             tag_start_position = file_size - GCM_TAG_SIZE
             
@@ -295,11 +305,9 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
             if file_size < min_size:
                  raise ValueError("Encrypted file is too small to be a valid container.")
 
-            # Read the tag from the end of the file
             f_in.seek(tag_start_position)
             tag = f_in.read(GCM_TAG_SIZE)
             
-            # Go back to the start of the ciphertext
             start_of_ciphertext = len(FILE_VERSION_HEADER) + KDF_HEADER_SIZE + ARGON2_SALT_LENGTH + GCM_NONCE_LENGTH
             f_in.seek(start_of_ciphertext) 
 
@@ -308,7 +316,6 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
                 algorithms.AES(key), modes.GCM(nonce, tag), backend=default_backend()
             ).decryptor()
 
-            # Pass the expanded AAD
             decryptor.authenticate_additional_data(aad)
             
             # 7. Stream file content and decrypt chunk by chunk
@@ -332,7 +339,7 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
         
         print(f"Decryption successful. Output: {output_file}")
         
-        # --- 10. AUTOMATIC CHECKSUM VERIFICATION ---
+        # 10. AUTOMATIC CHECKSUM VERIFICATION (Unchanged)
         if verify_report_path:
             report_path = Path(verify_report_path).resolve()
             original_data = load_original_checksum(report_path)
@@ -348,10 +355,24 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
                     print(f"❌ VERIFICATION FAILURE: The decrypted file hash does NOT match the original hash.")
                     print(f"   Original Hash: {original_hash}")
                     print(f"   Decrypted Hash: {decrypted_hash}")
+                
 
     except InvalidTag:
+        # Check for the override flag here
+        if force_insecure:
+            corrupt_output_file = Path(str(output_file) + CORRUPTION_SUFFIX)
+            
+            print("\n" + "="*80)
+            print("⚠️ SECURITY OVERRIDE ACTIVATED: Corrupted file saved.")
+            print("The decryption tag failed. The output file is UNVERIFIED and LIKELY CORRUPTED.")
+            print(f"Unverified output saved to: {corrupt_output_file}")
+            print("="*80)
+            # Rename the temporary file to the new, corrupted filename (Skipping cleanup)
+            os.rename(temp_output_file, corrupt_output_file)
+            return
+            
         print("Error: Decryption failed. Incorrect password or the file has been tampered with.", file=sys.stderr)
-        # Clean up the partial temporary file
+        # Default security action: delete the partial, unverified file
         if temp_output_file.exists():
             os.remove(temp_output_file)
         return
@@ -360,10 +381,12 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
         return
     except (struct.error, ValueError) as e:
         print(f"Error: File structure invalid or data missing ({e}).", file=sys.stderr)
+        # Default security action: delete the partial, unverified file
+        if temp_output_file.exists():
+            os.remove(temp_output_file)
         return
     except Exception as e:
         print(f"An unexpected error occurred during decryption: {e}", file=sys.stderr)
-        # Clean up the partial temporary file
         if temp_output_file.exists():
             os.remove(temp_output_file)
         return
@@ -402,6 +425,13 @@ def main():
         '--verify-report-path',
         type=str,
         help='(Decrypt Only) Path to the JSON report file to automatically verify the decrypted file\'s hash against the original file\'s hash.'
+    )
+    
+    # NEW INSECURE FLAG
+    parser.add_argument(
+        '--force-insecure-decrypt',
+        action='store_true',
+        help='(Decrypt Only) WARNING: Bypasses GCM integrity check on failure. Writes UNVERIFIED, potentially corrupted data to the output file.'
     )
 
     custom_settings_group = parser.add_argument_group(
@@ -447,7 +477,7 @@ def main():
     if args.encrypt:
         encrypt_file(args.encrypt, args.output, password, kdf_settings)
     elif args.decrypt:
-        decrypt_file(args.decrypt, args.output, password, args.verify_report_path)
+        decrypt_file(args.decrypt, args.output, password, args.verify_report_path, args.force_insecure_decrypt)
 
 
 if __name__ == '__main__':
