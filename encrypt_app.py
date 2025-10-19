@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 from getpass import getpass
 from pathlib import Path
 import struct
-# NEW IMPORTS FOR STREAMING AND CRYPTO
+import hashlib
+
+# --- Core Cryptography Imports ---
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -19,7 +21,7 @@ ENCRYPTED_FILE_SUFFIX = ".enc"
 REPORT_FILE_SUFFIX = ".report.json"
 AES_KEY_SIZE = 32 # 256 bits for AES-256
 GCM_NONCE_LENGTH = 12
-GCM_TAG_SIZE = 16 # NEW: Added constant for the tag size
+GCM_TAG_SIZE = 16 
 ARGON2_SALT_LENGTH = 16
 MIN_PASSWORD_LENGTH = 8 
 CHUNK_SIZE = 65536 # 64 KB read/write buffer size for streaming
@@ -35,6 +37,45 @@ KDF_SETTINGS = {
     'memory_cost': 65536,   # Memory cost in KiB (64 MiB)
     'lanes': 4              # Parallelism (threads/lanes)
 }
+
+CHECKSUM_ALGORITHM = "SHA-256"
+
+# --- Helper Functions ---
+
+def load_original_checksum(report_path: Path) -> tuple[str, str] | None:
+    """Reads the original checksum and algorithm from the JSON report."""
+    try:
+        with open(report_path, 'r') as f:
+            report_data = json.load(f)
+        
+        checksum_data = report_data.get('original_checksum')
+        if checksum_data and isinstance(checksum_data, dict):
+            return checksum_data.get('hash'), checksum_data.get('algorithm')
+        else:
+            print("Error: Report file does not contain checksum data.", file=sys.stderr)
+            return None
+    except FileNotFoundError:
+        print(f"Error: Verification report not found at '{report_path}'.", file=sys.stderr)
+        return None
+    except Exception as e:
+        print(f"Error reading verification report: {e}", file=sys.stderr)
+        return None
+
+
+def calculate_file_checksum(file_path: Path, chunk_size: int) -> str:
+    """Calculates the SHA-256 checksum of a file efficiently using streaming."""
+    hasher = hashlib.sha256()
+    try:
+        with open(file_path, 'rb') as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except Exception as e:
+        print(f"Error calculating checksum for output file: {e}", file=sys.stderr)
+        return ""
 
 
 def get_verified_password():
@@ -108,18 +149,22 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
 
     print(f"Starting encryption of '{input_file.name}'...")
     
-    # 1. Generate unique random values
+    # 1. Calculate the checksum of the original file (Automatic)
+    original_checksum = calculate_file_checksum(input_file, CHUNK_SIZE)
+    if not original_checksum:
+        print("Error: Could not generate file checksum. Aborting encryption.", file=sys.stderr)
+        return
+
+    # 2. Generate unique random values and derive key
     salt = os.urandom(ARGON2_SALT_LENGTH)
     nonce = os.urandom(GCM_NONCE_LENGTH)
-
-    # 2. Derive the key
     try:
         key = derive_key(password, salt, settings)
     except Exception as e:
         print(f"Error during key derivation: {e}", file=sys.stderr)
         return
 
-    # 3. Initialize the streaming cipher object
+    # 3. Initialize streaming cipher object
     try:
         encryptor = Cipher(
             algorithms.AES(key),
@@ -141,7 +186,7 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
         print(f"Error preparing encryption: {e}", file=sys.stderr)
         return
 
-    # 5. Write the file header components
+    # 5. Write file components and stream data
     try:
         with open(input_file, 'rb') as f_in, open(output_file, 'wb') as f_out:
             f_out.write(FILE_VERSION_HEADER)
@@ -149,23 +194,25 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
             f_out.write(salt)
             f_out.write(nonce)
             
-            # 6. Stream file content and encrypt chunk by chunk
             while True:
                 chunk = f_in.read(CHUNK_SIZE)
                 if len(chunk) == 0:
                     break
-                
-                # Encrypt the chunk and write it out
                 f_out.write(encryptor.update(chunk))
 
-            # 7. Finalize the encryption and write the Authentication Tag
             f_out.write(encryptor.finalize())
-            f_out.write(encryptor.tag) # GCM tag is stored separately
+            f_out.write(encryptor.tag)
             
         print(f"Encryption successful. Output: {output_file}")
         
-        # 8. Generate Report
-        report_data = {'kdf_settings': settings, 'algorithm': 'AES-256-GCM', 'salt': salt, 'nonce': nonce}
+        # 6. Generate Report (Include checksum)
+        report_data = {
+            'kdf_settings': settings, 
+            'algorithm': 'AES-256-GCM', 
+            'salt': salt, 
+            'nonce': nonce,
+            'original_checksum': {'algorithm': CHECKSUM_ALGORITHM, 'hash': original_checksum}
+        }
         generate_report(input_file, output_file, report_data)
 
     except FileNotFoundError:
@@ -178,11 +225,9 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
         return
 
 
-
-def decrypt_file(input_path: str, output_path: str, password: str):
+def decrypt_file(input_path: str, output_path: str, password: str, verify_report_path: str | None):
     """
-    Handles the main decryption logic: reads KDF parameters, derives the key,
-    and streams the decryption/authentication process.
+    Handles the main decryption logic and performs optional automatic checksum verification.
     """
     input_file = Path(input_path).resolve()
     
@@ -199,6 +244,7 @@ def decrypt_file(input_path: str, output_path: str, password: str):
     print(f"Decrypting '{input_file.name}' to '{output_file}'...")
     
     try:
+        # --- File Header Read and Decryption Setup ---
         with open(input_file, 'rb') as f_in:
             # 1. Read and verify Header
             header = f_in.read(len(FILE_VERSION_HEADER))
@@ -213,12 +259,8 @@ def decrypt_file(input_path: str, output_path: str, password: str):
                 return
 
             memory_cost, iterations, lanes = struct.unpack(KDF_HEADER_FORMAT, kdf_params_header)
-            
             kdf_settings_from_file = {
-                'algorithm': 'Argon2id',
-                'memory_cost': memory_cost,
-                'iterations': iterations,
-                'lanes': lanes
+                'algorithm': 'Argon2id', 'memory_cost': memory_cost, 'iterations': iterations, 'lanes': lanes
             }
             
             # 3. Read Metadata (Salt and Nonce/IV)
@@ -241,22 +283,17 @@ def decrypt_file(input_path: str, output_path: str, password: str):
                  print("Error: Encrypted file is too small to be a valid container.", file=sys.stderr)
                  return
 
-            # Read the tag from the end of the file
             f_in.seek(tag_start_position)
             tag = f_in.read(GCM_TAG_SIZE)
             
-            # Go back to the start of the ciphertext
             start_of_ciphertext = len(FILE_VERSION_HEADER) + KDF_HEADER_SIZE + ARGON2_SALT_LENGTH + GCM_NONCE_LENGTH
             f_in.seek(start_of_ciphertext) 
 
             # 6. Initialize the streaming decryptor
             decryptor = Cipher(
-                algorithms.AES(key),
-                modes.GCM(nonce, tag), # Provide the tag to the mode
-                backend=default_backend()
+                algorithms.AES(key), modes.GCM(nonce, tag), backend=default_backend()
             ).decryptor()
 
-            # Process the AAD first
             aad = FILE_VERSION_HEADER
             decryptor.authenticate_additional_data(aad)
             
@@ -268,17 +305,35 @@ def decrypt_file(input_path: str, output_path: str, password: str):
                     read_size = min(CHUNK_SIZE, bytes_to_read)
                     chunk = f_in.read(read_size)
                     
-                    if not chunk: 
-                        break 
+                    if not chunk: break 
                         
                     f_out.write(decryptor.update(chunk))
                     bytes_to_read -= len(chunk)
 
-                # 8. Finalize the decryption (verifies the tag)
+                # 8. Finalize the decryption (verifies the GCM tag)
                 f_out.write(decryptor.finalize())
             
         print(f"Decryption successful. Output: {output_file}")
-    
+        
+        # --- 9. AUTOMATIC CHECKSUM VERIFICATION ---
+        if verify_report_path:
+            report_path = Path(verify_report_path).resolve()
+            original_data = load_original_checksum(report_path)
+            
+            if original_data:
+                original_hash, algorithm = original_data
+                decrypted_hash = calculate_file_checksum(output_file, CHUNK_SIZE)
+                
+                print("\n--- Integrity Verification ---")
+                if decrypted_hash == original_hash:
+                    print(f"✅ VERIFICATION SUCCESS: Decrypted file {algorithm} matches the original hash in the report.")
+                else:
+                    print(f"❌ VERIFICATION FAILURE: The decrypted file hash does NOT match the original hash.")
+                    print(f"   Original Hash: {original_hash}")
+                    print(f"   Decrypted Hash: {decrypted_hash}")
+                    # Optional: Remove the decrypted file on checksum failure (for extreme security)
+                    # os.remove(output_file)
+            
     except InvalidTag:
         print("Error: Decryption failed. Incorrect password or the file has been tampered with.", file=sys.stderr)
         if output_file.exists():
@@ -294,7 +349,9 @@ def decrypt_file(input_path: str, output_path: str, password: str):
         print(f"An unexpected error occurred during decryption: {e}", file=sys.stderr)
         return
 
+# ----------------------------------------------------------------
 
+# --- Main CLI Logic ---
 
 def main():
     parser = argparse.ArgumentParser(
@@ -321,7 +378,16 @@ def main():
         type=str,
         help='Specify the output file path. Defaults to [INPUT].enc (encrypt) or [INPUT_BASE] (decrypt).'
     )
+    
+    # NEW: Checksum verification flag
+    parser.add_argument(
+        '--verify-report-path',
+        type=str,
+        help='(Decrypt Only) Path to the JSON report file to automatically verify the decrypted file\'s hash against the original file\'s hash.'
+    )
 
+
+    # --- Custom Settings (For the advanced user) ---
     custom_settings_group = parser.add_argument_group(
         'Custom KDF Settings (Advanced)', 
         'These settings override the Argon2id parameters for specialized use.'
@@ -367,7 +433,8 @@ def main():
     if args.encrypt:
         encrypt_file(args.encrypt, args.output, password, kdf_settings)
     elif args.decrypt:
-        decrypt_file(args.decrypt, args.output, password)
+        # Pass the verification report path
+        decrypt_file(args.decrypt, args.output, password, args.verify_report_path)
 
 
 if __name__ == '__main__':
