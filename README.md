@@ -40,7 +40,7 @@ The tool requires Python 3.9+ and the `cryptography` library. It is highly recom
 ```bash
 # Clone the repository
 git clone https://github.com/KnowOneActual/py_file_encrypt_tool.git
-cd secure-cloud-cli
+cd py_file_encrypt_tool
 ```
 
 # Create and activate virtual environment
@@ -49,9 +49,9 @@ python3 -m venv venv
 source venv/bin/activate  # macOS/Linux
 ```
 
-# Install dependencies (ensure cryptography is in requirements.txt)
+# Install dependencies
 ```bash
-pip install cryptography
+pip install requirements.txt
 ```
 
 ### Basic Usage (Encrypt - The Easy Button)
