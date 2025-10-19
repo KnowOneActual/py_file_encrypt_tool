@@ -2,6 +2,7 @@
 # Python File Encrypt CLI tool (py_file_encrypt_tool)
 
 ***
+✨ **VERSION: 0.1.0-beta.1** ✨
 ✅ **Development Status: Core Functionality Stable (Beta)** ✅
 The core encryption, decryption, and streaming pipeline is stable and ready for testing.
 ***
@@ -55,7 +56,7 @@ pip install cryptography
 
 ### Basic Usage (Encrypt - The Easy Button)
 
-Encrypts a file using all secure default settings. You will be prompted for a password (minimum 8 characters) and confirmation.
+Encrypts a file using all secure default settings. You will be prompted for a password (minimum 8 characters) and confirmation. 
 
 ```bash
 python encrypt_app.py --encrypt my_sensitive_data.pdf
