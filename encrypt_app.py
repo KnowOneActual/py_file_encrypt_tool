@@ -164,18 +164,8 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
         print(f"Error during key derivation: {e}", file=sys.stderr)
         return
 
-    # 3. Initialize streaming cipher object
+    # 3. Create the KDF parameter header
     try:
-        encryptor = Cipher(
-            algorithms.AES(key),
-            modes.GCM(nonce),
-            backend=default_backend()
-        ).encryptor()
-        
-        aad = FILE_VERSION_HEADER 
-        encryptor.authenticate_additional_data(aad)
-
-        # 4. Create the KDF parameter header
         kdf_params_header = struct.pack(
             KDF_HEADER_FORMAT,
             settings['memory_cost'],
@@ -183,17 +173,36 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
             settings['lanes']
         )
     except Exception as e:
+        print(f"Error packing KDF parameters: {e}", file=sys.stderr)
+        return
+        
+    # NEW SECURITY FIX: Expanded AAD includes the entire header
+    aad = FILE_VERSION_HEADER + kdf_params_header + salt + nonce 
+
+    # 4. Initialize streaming cipher object
+    try:
+        encryptor = Cipher(
+            algorithms.AES(key),
+            modes.GCM(nonce),
+            backend=default_backend()
+        ).encryptor()
+        
+        encryptor.authenticate_additional_data(aad)
+
+    except Exception as e:
         print(f"Error preparing encryption: {e}", file=sys.stderr)
         return
 
     # 5. Write file components and stream data
     try:
         with open(input_file, 'rb') as f_in, open(output_file, 'wb') as f_out:
+            # Write all AAD components to the file for decryption to read
             f_out.write(FILE_VERSION_HEADER)
             f_out.write(kdf_params_header)
             f_out.write(salt)
             f_out.write(nonce)
             
+            # Stream file content and encrypt chunk by chunk
             while True:
                 chunk = f_in.read(CHUNK_SIZE)
                 if len(chunk) == 0:
@@ -227,7 +236,7 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
 
 def decrypt_file(input_path: str, output_path: str, password: str, verify_report_path: str | None):
     """
-    Handles the main decryption logic and performs optional automatic checksum verification.
+    Handles the main decryption logic, using write-to-temp-then-rename for atomic decryption.
     """
     input_file = Path(input_path).resolve()
     
@@ -241,6 +250,9 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
     else:
         output_file = Path(output_path).resolve()
         
+    # NEW SECURITY FIX: Atomic Decryption setup
+    temp_output_file = output_file.with_suffix(output_file.suffix + '.tmp')
+        
     print(f"Decrypting '{input_file.name}' to '{output_file}'...")
     
     try:
@@ -249,16 +261,15 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
             # 1. Read and verify Header
             header = f_in.read(len(FILE_VERSION_HEADER))
             if header != FILE_VERSION_HEADER:
-                print("Error: Invalid file header. This file may be corrupt or not created by this tool.", file=sys.stderr)
-                return
+                raise ValueError("Invalid file header. This file may be corrupt or not created by this tool.")
             
             # 2. Read and unpack KDF Parameters
             kdf_params_header = f_in.read(KDF_HEADER_SIZE)
             if len(kdf_params_header) != KDF_HEADER_SIZE:
-                print("Error: Encrypted file is incomplete (missing KDF parameters).", file=sys.stderr)
-                return
+                raise ValueError("Encrypted file is incomplete (missing KDF parameters).")
 
             memory_cost, iterations, lanes = struct.unpack(KDF_HEADER_FORMAT, kdf_params_header)
+            
             kdf_settings_from_file = {
                 'algorithm': 'Argon2id', 'memory_cost': memory_cost, 'iterations': iterations, 'lanes': lanes
             }
@@ -268,11 +279,13 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
             nonce = f_in.read(GCM_NONCE_LENGTH)
             
             if len(salt) != ARGON2_SALT_LENGTH or len(nonce) != GCM_NONCE_LENGTH:
-                print("Error: Encrypted file is incomplete (missing salt or nonce).", file=sys.stderr)
-                return
+                raise ValueError("Encrypted file is incomplete (missing salt or nonce).")
             
             # 4. Derive the key
             key = derive_key(password, salt, kdf_settings_from_file)
+            
+            # NEW SECURITY FIX: Expanded AAD includes the entire header
+            aad = FILE_VERSION_HEADER + kdf_params_header + salt + nonce
             
             # 5. Calculate tag position and read the tag
             file_size = os.path.getsize(input_file)
@@ -280,12 +293,13 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
             
             min_size = len(FILE_VERSION_HEADER) + KDF_HEADER_SIZE + ARGON2_SALT_LENGTH + GCM_NONCE_LENGTH + GCM_TAG_SIZE
             if file_size < min_size:
-                 print("Error: Encrypted file is too small to be a valid container.", file=sys.stderr)
-                 return
+                 raise ValueError("Encrypted file is too small to be a valid container.")
 
+            # Read the tag from the end of the file
             f_in.seek(tag_start_position)
             tag = f_in.read(GCM_TAG_SIZE)
             
+            # Go back to the start of the ciphertext
             start_of_ciphertext = len(FILE_VERSION_HEADER) + KDF_HEADER_SIZE + ARGON2_SALT_LENGTH + GCM_NONCE_LENGTH
             f_in.seek(start_of_ciphertext) 
 
@@ -294,11 +308,11 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
                 algorithms.AES(key), modes.GCM(nonce, tag), backend=default_backend()
             ).decryptor()
 
-            aad = FILE_VERSION_HEADER
+            # Pass the expanded AAD
             decryptor.authenticate_additional_data(aad)
             
             # 7. Stream file content and decrypt chunk by chunk
-            with open(output_file, 'wb') as f_out:
+            with open(temp_output_file, 'wb') as f_out: # Write to temp file
                 bytes_to_read = tag_start_position - start_of_ciphertext
                 
                 while bytes_to_read > 0:
@@ -310,12 +324,15 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
                     f_out.write(decryptor.update(chunk))
                     bytes_to_read -= len(chunk)
 
-                # 8. Finalize the decryption (verifies the GCM tag)
+                # 8. Finalize the decryption (this verifies the GCM tag)
                 f_out.write(decryptor.finalize())
-            
+        
+        # 9. ATOMIC RENAME: Only rename the file if GCM tag verification succeeds
+        os.rename(temp_output_file, output_file)
+        
         print(f"Decryption successful. Output: {output_file}")
         
-        # --- 9. AUTOMATIC CHECKSUM VERIFICATION ---
+        # --- 10. AUTOMATIC CHECKSUM VERIFICATION ---
         if verify_report_path:
             report_path = Path(verify_report_path).resolve()
             original_data = load_original_checksum(report_path)
@@ -331,27 +348,29 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
                     print(f"❌ VERIFICATION FAILURE: The decrypted file hash does NOT match the original hash.")
                     print(f"   Original Hash: {original_hash}")
                     print(f"   Decrypted Hash: {decrypted_hash}")
-                    # Optional: Remove the decrypted file on checksum failure (for extreme security)
-                    # os.remove(output_file)
-            
+
     except InvalidTag:
         print("Error: Decryption failed. Incorrect password or the file has been tampered with.", file=sys.stderr)
-        if output_file.exists():
-            os.remove(output_file)
+        # Clean up the partial temporary file
+        if temp_output_file.exists():
+            os.remove(temp_output_file)
         return
     except FileNotFoundError:
-        print(f"Error: Encrypted file not found at '{input_file}'", file=sys.stderr)
+        print(f"Error: Required file not found.", file=sys.stderr)
         return
-    except struct.error as e:
-        print(f"Error parsing file header: {e}. File structure may be invalid.", file=sys.stderr)
+    except (struct.error, ValueError) as e:
+        print(f"Error: File structure invalid or data missing ({e}).", file=sys.stderr)
         return
     except Exception as e:
         print(f"An unexpected error occurred during decryption: {e}", file=sys.stderr)
+        # Clean up the partial temporary file
+        if temp_output_file.exists():
+            os.remove(temp_output_file)
         return
 
 # ----------------------------------------------------------------
 
-# --- Main CLI Logic ---
+# --- Main CLI Logic (Unchanged) ---
 
 def main():
     parser = argparse.ArgumentParser(
@@ -379,15 +398,12 @@ def main():
         help='Specify the output file path. Defaults to [INPUT].enc (encrypt) or [INPUT_BASE] (decrypt).'
     )
     
-    # NEW: Checksum verification flag
     parser.add_argument(
         '--verify-report-path',
         type=str,
         help='(Decrypt Only) Path to the JSON report file to automatically verify the decrypted file\'s hash against the original file\'s hash.'
     )
 
-
-    # --- Custom Settings (For the advanced user) ---
     custom_settings_group = parser.add_argument_group(
         'Custom KDF Settings (Advanced)', 
         'These settings override the Argon2id parameters for specialized use.'
@@ -411,7 +427,6 @@ def main():
         help=f"Parallelism (threads/lanes) for Argon2id. Default: {KDF_SETTINGS['lanes']}"
     )
 
-
     args = parser.parse_args()
     
     # Password handling logic
@@ -423,7 +438,6 @@ def main():
             print(f"Error: Decryption password must be at least {MIN_PASSWORD_LENGTH} characters long.", file=sys.stderr)
             sys.exit(1)
 
-
     # Combine KDF settings
     kdf_settings = KDF_SETTINGS.copy()
     kdf_settings['memory_cost'] = args.kdf_memory
@@ -433,7 +447,6 @@ def main():
     if args.encrypt:
         encrypt_file(args.encrypt, args.output, password, kdf_settings)
     elif args.decrypt:
-        # Pass the verification report path
         decrypt_file(args.decrypt, args.output, password, args.verify_report_path)
 
 

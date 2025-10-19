@@ -9,16 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Initial project setup.
-- **Core Cryptography:** Implemented secure, authenticated encryption using **AES-256 GCM** and **Argon2id** Key Derivation for strong, industry-standard security.
+- **Core Cryptography:** Implemented secure, authenticated encryption using **AES-256 GCM** and **Argon2id** Key Derivation.
 - **Security Report:** Added a feature to generate a detailed JSON report (with KDF settings, salt, and nonce) for transparency and auditing.
-- **Passphrase Security:** Implemented verified password entry and enforced a minimum length of 8 characters for usability and basic security.
+- **Passphrase Security:** Implemented verified password entry and enforced a minimum length of 8 characters.
 - **Non-Cryptographic Integrity Check:** Automatically calculates the **SHA-256 checksum** of the original file during encryption and includes it in the report.
 - **Optional Verification:** Added the `--verify-report-path` flag to automatically verify the decrypted file's hash against the original hash stored in the report.
+- **Decryption Resilience:** Implemented **Atomic Decryption (write-to-temp-then-rename)** to prevent file corruption in case of system failure during the decryption process.
 
 ### Changed
 - **Large File Support (Streaming):** Refactored both encryption and decryption to use file streaming, enabling low-memory processing of files of arbitrary size.
 - **Cross-Platform KDF Persistence:** Modified the encrypted file format to embed all Argon2id parameters (memory cost, iterations, lanes) in the header, guaranteeing successful decryption of files encrypted with custom settings on any machine.
 - **Robust Path Handling:** Refactored file path logic using `pathlib.Path.resolve()` to ensure files are correctly located and written regardless of the user's current working directory.
+- **Critical Security Enhancement:** Expanded the **GCM Additional Authenticated Data (AAD)** to include the entire file header (KDF parameters, Salt, and Nonce), cryptographically preventing tampering with any piece of metadata.
 
 ### Fixed
 - Resolved `ModuleNotFoundError` by clarifying environment setup requirements.
