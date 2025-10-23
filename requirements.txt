@@ -3,6 +3,6 @@
 # Core cryptography library that wraps OpenSSL
 cryptography
 
-# Library for password hashing (Argon2), highly recommended for security
+# Library for password hashing (Argon2), for security
 # Argon2 is often included with cryptography, but it is good to explicitly name the dependency
 argon2-cffi
