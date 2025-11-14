@@ -428,7 +428,27 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
 def main():
     parser = argparse.ArgumentParser(
         description="A secure, cross-platform CLI tool for file encryption.",
-        epilog="Use the --encrypt command for secure defaults (Easy Button), or use optional flags for custom settings."
+        # --- MODIFIED SECTION ---
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+
+  # 1. Encrypt a file (Easy Button - you will be prompted for a password)
+  python encrypt_app.py --encrypt "my_sensitive_data.pdf"
+
+  # 2. Decrypt a file (you will be prompted for a password)
+  python encrypt_app.py --decrypt "my_sensitive_data.pdf.enc"
+
+  # 3. Decrypt and verify integrity against the original report
+  python encrypt_app.py --decrypt "file.enc" --verify-report-path "file.report.json"
+
+  # 4. Encrypt using a generated password (WARNING: Password saved in .report.json)
+  python encrypt_app.py --encrypt "file.txt" --generate-password
+  
+  # 5. Encrypt using a generated password of a specific length (10-20)
+  python encrypt_app.py --encrypt "file.txt" --generate-password 20
+"""
+        # --- END MODIFICATION ---
     )
     
     group = parser.add_mutually_exclusive_group(required=True)
@@ -512,7 +532,7 @@ def main():
     if args.encrypt:
         if args.generate_password:
             # Use the provided length, or the const (18) if none was given
-            pw_length = args.generate_password
+            pw_length = args.generate-password
             password = generate_secure_password(pw_length)
             password_was_generated = True
             print(f"Generating new {pw_length}-character password...")
