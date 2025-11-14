@@ -2,6 +2,8 @@ import argparse
 import sys
 import os
 import json
+import secrets
+import string
 from datetime import datetime, timezone 
 from getpass import getpass
 from pathlib import Path
@@ -42,7 +44,18 @@ KDF_SETTINGS = {
 
 CHECKSUM_ALGORITHM = "SHA-256"
 
-# --- Helper Functions (Unchanged) ---
+# --- Helper Functions ---
+
+def generate_secure_password(length: int) -> str:
+    """Generates a cryptographically secure password between 10-20 characters."""
+    if not 10 <= length <= 20:
+        # This is a safeguard, argparse should catch it first
+        raise ValueError("Password length must be between 10 and 20 characters.")
+        
+    # Using ASCII letters and digits for broad compatibility
+    alphabet = string.ascii_letters + string.digits
+    password = ''.join(secrets.choice(alphabet) for _ in range(length))
+    return password
 
 def load_original_checksum(report_path: Path) -> tuple[str, str] | None:
     """Reads the original checksum and algorithm from the JSON report."""
@@ -114,8 +127,8 @@ def derive_key(password: str, salt: bytes, settings: dict) -> bytes:
     return key
 
 
-def generate_report(input_file: Path, output_file: Path, report_data: dict):
-    """Generates a JSON report detailing the encryption settings."""
+def generate_report(input_file: Path, output_file: Path, report_data: dict, generated_password: str | None = None) -> Path | None:
+    """Generates a JSON report, optionally adds a generated password, and returns the path."""
     
     report_path = input_file.with_suffix(REPORT_FILE_SUFFIX)
     
@@ -123,6 +136,9 @@ def generate_report(input_file: Path, output_file: Path, report_data: dict):
     report_data['encrypted_file'] = output_file.name
     report_data['timestamp'] = datetime.now(timezone.utc).isoformat() 
     
+    if generated_password:
+        report_data['generated_password'] = generated_password
+
     if isinstance(report_data.get('salt'), bytes):
         report_data['salt'] = report_data['salt'].hex()
     if isinstance(report_data.get('nonce'), bytes):
@@ -132,11 +148,13 @@ def generate_report(input_file: Path, output_file: Path, report_data: dict):
         with open(report_path, 'w') as f:
             json.dump(report_data, f, indent=4)
         print(f"Report generated successfully: {report_path}")
+        return report_path
     except Exception as e:
         print(f"Warning: Could not write encryption report: {e}", file=sys.stderr)
+        return None
 
 
-def encrypt_file(input_path: str, output_path: str, password: str, settings: dict):
+def encrypt_file(input_path: str, output_path: str, password: str, settings: dict, password_was_generated: bool = False):
     """
     Encrypts the file using AES-256-GCM, streaming data in chunks.
     The output file format is: [HEADER][KDF_PARAMS][SALT][NONCE][CIPHERTEXT][TAG]
@@ -224,7 +242,19 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
             'nonce': nonce,
             'original_checksum': {'algorithm': CHECKSUM_ALGORITHM, 'hash': original_checksum}
         }
-        generate_report(input_file, output_file, report_data)
+        
+        gen_pass_arg = password if password_was_generated else None
+        report_path = generate_report(input_file, output_file, report_data, generated_password=gen_pass_arg)
+
+        # 7. Print warning if password was generated
+        if password_was_generated and report_path:
+            print("\n" + "="*80)
+            print("⚠️ ⚠️  PASSWORD GENERATED AND SAVED IN REPORT ⚠️ ⚠️")
+            print(f"A new secure password was generated for this file.")
+            print(f"It has been saved in the JSON report: {report_path}")
+            print("WARNING: This is your ONLY copy. Secure this report file.")
+            print("If you lose the report, you will lose access to the encrypted file.")
+            print("="*80 + "\n")
 
     except FileNotFoundError:
         print(f"Error: Input file not found at '{input_file}'", file=sys.stderr)
@@ -393,7 +423,7 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
 
 # ----------------------------------------------------------------
 
-# --- Main CLI Logic (Unchanged) ---
+# --- Main CLI Logic ---
 
 def main():
     parser = argparse.ArgumentParser(
@@ -434,6 +464,18 @@ def main():
         help='(Decrypt Only) WARNING: Bypasses GCM integrity check on failure. Writes UNVERIFIED, potentially corrupted data to the output file.'
     )
 
+    # NEW PASSWORD GENERATOR FLAG
+    parser.add_argument(
+        '--generate-password',
+        nargs='?',                 # Makes the value optional
+        const=18,                  # Default length if flag is present with no value
+        type=int,
+        choices=range(10, 21),     # Enforces 10-20 character limit
+        metavar='LENGTH',
+        help='(Encrypt Only) Generate a secure password and save it in the report file. '
+             'Default length is 18 if no length is specified. (Range: 10-20)'
+    )
+
     custom_settings_group = parser.add_argument_group(
         'Custom KDF Settings (Advanced)', 
         'These settings override the Argon2id parameters for specialized use.'
@@ -459,14 +501,30 @@ def main():
 
     args = parser.parse_args()
     
-    # Password handling logic
+    # --- Updated Password handling logic ---
+    password = None
+    password_was_generated = False
+    
+    if args.generate_password and not args.encrypt:
+        print("Error: --generate-password can only be used with --encrypt.", file=sys.stderr)
+        sys.exit(1)
+
     if args.encrypt:
-        password = get_verified_password()
+        if args.generate_password:
+            # Use the provided length, or the const (18) if none was given
+            pw_length = args.generate_password
+            password = generate_secure_password(pw_length)
+            password_was_generated = True
+            print(f"Generating new {pw_length}-character password...")
+        else:
+            password = get_verified_password()
+            
     elif args.decrypt:
         password = getpass("Enter password: ")
         if len(password) < MIN_PASSWORD_LENGTH:
             print(f"Error: Decryption password must be at least {MIN_PASSWORD_LENGTH} characters long.", file=sys.stderr)
             sys.exit(1)
+    # --- End Updated Logic ---
 
     # Combine KDF settings
     kdf_settings = KDF_SETTINGS.copy()
@@ -475,7 +533,7 @@ def main():
     kdf_settings['lanes'] = args.kdf_parallelism
 
     if args.encrypt:
-        encrypt_file(args.encrypt, args.output, password, kdf_settings)
+        encrypt_file(args.encrypt, args.output, password, kdf_settings, password_was_generated=password_was_generated)
     elif args.decrypt:
         decrypt_file(args.decrypt, args.output, password, args.verify_report_path, args.force_insecure_decrypt)
 
