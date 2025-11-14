@@ -167,6 +167,13 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
     else:
         output_file = Path(output_path).resolve()
 
+    # --- Overwrite Protection ---
+    if output_file.exists():
+        answer = input(f"Warning: Output file '{output_file.name}' already exists. Overwrite? (y/N) ")
+        if answer.lower() != 'y':
+            print("Encryption aborted by user.", file=sys.stderr)
+            return
+
     print(f"Starting encryption of '{input_file.name}'...")
     
     # 1. Calculate the checksum of the original file (Automatic)
@@ -364,14 +371,34 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
                 # 8. Finalize the decryption (this verifies the GCM tag)
                 f_out.write(decryptor.finalize())
         
-        # 9. ATOMIC RENAME: Only rename the file if GCM tag verification succeeds
+        # 9. ATOMIC RENAME: Only rename after GCM tag check
+        # --- Overwrite Protection ---
+        if output_file.exists():
+            answer = input(f"Warning: Output file '{output_file.name}' already exists. Overwrite? (y/N) ")
+            if answer.lower() != 'y':
+                print("Decryption aborted by user.", file=sys.stderr)
+                if temp_output_file.exists():
+                    os.remove(temp_output_file)
+                return
+        
         os.rename(temp_output_file, output_file)
         
         print(f"Decryption successful. Output: {output_file}")
         
-        # 10. AUTOMATIC CHECKSUM VERIFICATION (Unchanged)
-        if verify_report_path:
-            report_path = Path(verify_report_path).resolve()
+        # 10. "SMART" CHECKSUM VERIFICATION
+        verify_path_to_check = verify_report_path
+        
+        # If no verify flag was given, automatically check for a report
+        if not verify_path_to_check:
+            potential_report_path = input_file.with_suffix(REPORT_FILE_SUFFIX)
+            if potential_report_path.exists():
+                print(f"Found report: {potential_report_path.name}")
+                answer = input("Verify decrypted file against this report? (Y/n) ")
+                if answer.lower() != 'n':
+                    verify_path_to_check = str(potential_report_path)
+
+        if verify_path_to_check:
+            report_path = Path(verify_path_to_check).resolve()
             original_data = load_original_checksum(report_path)
             
             if original_data:
@@ -428,38 +455,43 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
 def main():
     parser = argparse.ArgumentParser(
         description="A secure, cross-platform CLI tool for file encryption.",
-        # --- MODIFIED SECTION ---
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
 
   # 1. Encrypt a file (Easy Button - you will be prompted for a password)
-  python encrypt_app.py --encrypt "my_sensitive_data.pdf"
+  python encrypt_app.py -e "my_sensitive_data.pdf"
 
   # 2. Decrypt a file (you will be prompted for a password)
-  python encrypt_app.py --decrypt "my_sensitive_data.pdf.enc"
+  python encrypt_app.py -d "my_sensitive_data.pdf.enc"
 
-  # 3. Decrypt and verify integrity against the original report
-  python encrypt_app.py --decrypt "file.enc" --verify-report-path "file.report.json"
+  # 3. Decrypt and verify integrity (auto-finds report)
+  python encrypt_app.py -d "file.enc"
+  # (If 'file.report.json' exists, it will ask to verify)
 
-  # 4. Encrypt using a generated password (WARNING: Password saved in .report.json)
-  python encrypt_app.py --encrypt "file.txt" --generate-password
+  # 4. Decrypt and specify verification report path
+  python encrypt_app.py -d "file.enc" -v "file.report.json"
+
+  # 5. Encrypt using a generated password (WARNING: Password saved in .report.json)
+  python encrypt_app.py -e "file.txt" -g
   
-  # 5. Encrypt using a generated password of a specific length (10-20)
-  python encrypt_app.py --encrypt "file.txt" --generate-password 20
+  # 6. Encrypt using a generated password of a specific length (10-20)
+  python encrypt_app.py -e "file.txt" -g 20
+
+  # 7. Encrypt using a password from a script (advanced)
+  echo "MySecretPassword" | python encrypt_app.py -e "file.txt" --password-stdin
 """
-        # --- END MODIFICATION ---
     )
     
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
-        '--encrypt',
+        '-e', '--encrypt',
         metavar='FILE',
         type=str,
         help='Encrypt the specified file using secure defaults.'
     )
     group.add_argument(
-        '--decrypt',
+        '-d', '--decrypt',
         metavar='FILE.enc',
         type=str,
         help='Decrypt the specified encrypted file.'
@@ -472,28 +504,32 @@ Examples:
     )
     
     parser.add_argument(
-        '--verify-report-path',
+        '-v', '--verify-report-path',
         type=str,
-        help='(Decrypt Only) Path to the JSON report file to automatically verify the decrypted file\'s hash against the original file\'s hash.'
+        help='(Decrypt Only) Path to the JSON report file to manually verify the decrypted file\'s hash.'
     )
     
-    # NEW INSECURE FLAG
     parser.add_argument(
-        '--force-insecure-decrypt',
-        action='store_true',
-        help='(Decrypt Only) WARNING: Bypasses GCM integrity check on failure. Writes UNVERIFIED, potentially corrupted data to the output file.'
-    )
-
-    # NEW PASSWORD GENERATOR FLAG
-    parser.add_argument(
-        '--generate-password',
-        nargs='?',                 # Makes the value optional
-        const=18,                  # Default length if flag is present with no value
+        '-g', '--generate-password',
+        nargs='?',
+        const=18,
         type=int,
-        choices=range(10, 21),     # Enforces 10-20 character limit
+        choices=range(10, 21),
         metavar='LENGTH',
         help='(Encrypt Only) Generate a secure password and save it in the report file. '
              'Default length is 18 if no length is specified. (Range: 10-20)'
+    )
+    
+    parser.add_argument(
+        '--password-stdin',
+        action='store_true',
+        help='(Advanced) Read password from stdin instead of prompting.'
+    )
+
+    parser.add_argument(
+        '--force-insecure-decrypt',
+        action='store_true',
+        help='(Decrypt Only) WARNING: Bypasses GCM integrity check on failure. Writes UNVERIFIED, potentially corrupted data.'
     )
 
     custom_settings_group = parser.add_argument_group(
@@ -526,31 +562,47 @@ Examples:
     password_was_generated = False
     
     if args.generate_password and not args.encrypt:
-        print("Error: --generate-password can only be used with --encrypt.", file=sys.stderr)
+        print("Error: -g/--generate-password can only be used with -e/--encrypt.", file=sys.stderr)
+        sys.exit(1)
+
+    if args.password_stdin and args.generate_password:
+        print("Error: --password-stdin and -g/--generate-password cannot be used together.", file=sys.stderr)
         sys.exit(1)
 
     if args.encrypt:
         if args.generate_password:
-            # Use the provided length, or the const (18) if none was given
-            pw_length = args.generate-password
+            pw_length = args.generate_password
             password = generate_secure_password(pw_length)
             password_was_generated = True
             print(f"Generating new {pw_length}-character password...")
+        elif args.password_stdin:
+            print("Reading password from stdin...", file=sys.stderr)
+            password = sys.stdin.readline().strip()
+            if len(password) < MIN_PASSWORD_LENGTH:
+                 print(f"Error: Password from stdin must be at least {MIN_PASSWORD_LENGTH} characters.", file=sys.stderr)
+                 sys.exit(1)
         else:
             password = get_verified_password()
             
     elif args.decrypt:
-        password = getpass("Enter password: ")
-        if len(password) < MIN_PASSWORD_LENGTH:
-            print(f"Error: Decryption password must be at least {MIN_PASSWORD_LENGTH} characters long.", file=sys.stderr)
-            sys.exit(1)
+        if args.password_stdin:
+            print("Reading password from stdin...", file=sys.stderr)
+            password = sys.stdin.readline().strip()
+            if not password:
+                 print("Error: Password from stdin cannot be empty.", file=sys.stderr)
+                 sys.exit(1)
+        else:
+            password = getpass("Enter password: ")
+            if len(password) < MIN_PASSWORD_LENGTH:
+                print(f"Error: Decryption password must be at least {MIN_PASSWORD_LENGTH} characters long.", file=sys.stderr)
+                sys.exit(1)
     # --- End Updated Logic ---
 
     # Combine KDF settings
     kdf_settings = KDF_SETTINGS.copy()
     kdf_settings['memory_cost'] = args.kdf_memory
     kdf_settings['iterations'] = args.kdf_time
-    kdf_settings['lanes'] = args.kdf_parallelism
+    kdf_settings['lanes'] = args.kdsf_parallelism
 
     if args.encrypt:
         encrypt_file(args.encrypt, args.output, password, kdf_settings, password_was_generated=password_was_generated)

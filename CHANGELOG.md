@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+
+## [0.1.0-beta.3] - 2025-11-14
+
+### Added
+- **Shorthand Flags:** Added common shorthands for easier CLI use: `-e` (`--encrypt`), `-d` (`--decrypt`), `-o` (`--output`), `-v` (`--verify-report-path`), and `-g` (`--generate-password`).
+- **Data Safety:** The tool now checks if an output file exists during both encryption and decryption and will prompt the user for confirmation before overwriting any data.
+- **Scripting Support:** Added a `--password-stdin` flag to allow the password to be piped from `stdin`, enabling use in automated scripts.
+
+### Changed
+- **Smart Verification:** The decryption command (`-d`) now automatically looks for a corresponding `.report.json` file. If one is found, it will ask the user if they want to perform an integrity check, removing the need to manually use the `-v` flag.
+- **Help Text:** Updated the CLI help examples to include the new shorthand flags and the `--password-stdin` command.
+
+
+
 ## [0.1.0-beta.2] - 2025-11-14
 
 ### Added
