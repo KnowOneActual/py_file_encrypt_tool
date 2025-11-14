@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.2] - 2025-11-14
+
+### Added
+- Added `--generate-password` flag to the `--encrypt` command. This generates a cryptographically secure password (10-20 chars, 18 default), uses it for encryption, and automatically saves it to the `.report.json` file.
+- Added a prominent console warning when using `--generate-password` to remind the user that the report file now contains the password and must be secured.
+
+### Changed
+- Improved the CLI help text (`--help`) by adding an `epilog` with 5 common usage examples for encryption, decryption, verification, and password generation.
+
+
 ## [0.1.0-beta.1] - 2025-10-19 
 
 ### Added
