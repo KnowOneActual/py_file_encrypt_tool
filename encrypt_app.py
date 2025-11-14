@@ -4,6 +4,7 @@ import os
 import json
 import secrets
 import string
+import tempfile
 from datetime import datetime, timezone 
 from getpass import getpass
 from pathlib import Path
@@ -349,8 +350,8 @@ def decrypt_file(input_file: Path, output_file: Path | None, verify_report_path:
         # output_file is already a validated Path
         pass 
         
-    # Safe, derived from validated output_file
-    temp_output_file = output_file.with_suffix(output_file.suffix + '.tmp')
+    # --- MODIFIED: Use tempfile ---
+    temp_file_path = None # Store path for cleanup
         
     print(f"Decrypting '{input_file.name}' to '{output_file}'...")
     
@@ -417,7 +418,10 @@ def decrypt_file(input_file: Path, output_file: Path | None, verify_report_path:
             decryptor.authenticate_additional_data(aad)
             
             # 7. Stream file content and decrypt chunk by chunk
-            with open(temp_output_file, 'wb') as f_out: # nosec B310 - Path is sanitized
+            # --- MODIFIED: Use tempfile ---
+            with tempfile.NamedTemporaryFile(dir=output_file.parent, delete=False) as f_out:
+                temp_file_path = f_out.name # Store the random path
+                
                 bytes_to_read = tag_start_position - start_of_ciphertext
                 
                 while bytes_to_read > 0:
@@ -438,11 +442,12 @@ def decrypt_file(input_file: Path, output_file: Path | None, verify_report_path:
             answer = input(f"Warning: Output file '{output_file.name}' already exists. Overwrite? (y/N) ")
             if answer.lower() != 'y':
                 print("Decryption aborted by user.", file=sys.stderr)
-                if temp_output_file.exists():
-                    os.remove(temp_output_file) # nosec B310 - Path is sanitized
+                if temp_file_path and Path(temp_file_path).exists():
+                    os.remove(temp_file_path) # nosec B310 - Path is sanitized
                 return
         
-        os.rename(temp_output_file, output_file) # nosec B310 - Paths are sanitized
+        os.rename(temp_file_path, output_file) # nosec B310 - Paths are sanitized
+        temp_file_path = None # Set to None as rename was successful
         
         print(f"Decryption successful. Output: {output_file}")
         
@@ -485,25 +490,29 @@ def decrypt_file(input_file: Path, output_file: Path | None, verify_report_path:
             print("The decryption tag failed. The output file is UNVERIFIED and LIKELY CORRUPTED.")
             print(f"Unverified output saved to: {corrupt_output_file}")
             print("="*80)
-            os.rename(temp_output_file, corrupt_output_file) # nosec B310 - Paths are sanitized
+            if temp_file_path and Path(temp_file_path).exists():
+                 os.rename(temp_file_path, corrupt_output_file) # nosec B310 - Paths are sanitized
+                 temp_file_path = None
             return
             
         print("Error: Decryption failed. Incorrect password or the file has been tampered with.", file=sys.stderr)
-        if temp_output_file.exists():
-            os.remove(temp_output_file) # nosec B310 - Path is sanitized
+        if temp_file_path and Path(temp_file_path).exists():
+            os.remove(temp_file_path) # nosec B310 - Path is sanitized
         return
     except FileNotFoundError:
         print(f"Error: Required file not found.", file=sys.stderr)
+        if temp_file_path and Path(temp_file_path).exists():
+            os.remove(temp_file_path) # nosec B310
         return
     except (struct.error, ValueError) as e:
         print(f"Error: File structure invalid or data missing ({e}).", file=sys.stderr)
-        if temp_output_file.exists():
-            os.remove(temp_output_file) # nosec B310 - Path is sanitized
+        if temp_file_path and Path(temp_file_path).exists():
+            os.remove(temp_file_path) # nosec B310 - Path is sanitized
         return
     except Exception as e:
         print(f"An unexpected error occurred during decryption: {e}", file=sys.stderr)
-        if temp_output_file.exists():
-            os.remove(temp_output_file) # nosec B310 - Path is sanitized
+        if temp_file_path and Path(temp_file_path).exists():
+            os.remove(temp_file_path) # nosec B310 - Path is sanitized
         return
 
 # ----------------------------------------------------------------
@@ -537,7 +546,7 @@ Examples:
   python encrypt_app.py -e "file.txt" -g 20
 
   # 7. Encrypt using a password from a script (advanced)
-  echo "MySecretPassword" | python encrypt_app.py -e "file.txt" --password-stdin
+  echo "MySuperSecretP@ssword" | python encrypt_app.py -e "file.txt" --password-stdin
 """
     )
     
@@ -669,7 +678,7 @@ Examples:
     if args.encrypt:
         encrypt_input_path = validate_and_resolve_path(args.encrypt, "encrypt input", check_exists=True)
     elif args.decrypt:
-        decrypt_input_path = validate_and_resolve_path(args.decrypt, "decrypt input", check_exists=True)
+        decrypt_input_path = validate_and_resolve_.path(args.decrypt, "decrypt input", check_exists=True)
 
     # Validate optional paths
     output_path = validate_and_resolve_path(args.output, "output", check_exists=False)
