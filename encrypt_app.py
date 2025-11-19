@@ -4,6 +4,7 @@ import os
 import json
 import secrets
 import string
+import tempfile
 from datetime import datetime, timezone 
 from getpass import getpass
 from pathlib import Path
@@ -46,21 +47,83 @@ CHECKSUM_ALGORITHM = "SHA-256"
 
 # --- Helper Functions ---
 
+def validate_and_resolve_path(user_path_str: str | None, operation_name: str, check_exists: bool = False) -> Path | None:
+    """
+    Safely resolves a user-provided path, ensuring it is at or under the CWD.
+    This prevents Path Traversal attacks by checking for malicious components *before* use.
+    Raises SystemExit on failure.
+    """
+    if not user_path_str:
+        return None
+
+    # --- EXPLICIT SANITIZATION CHECKS (for Snyk) ---
+    # 1. Disallow absolute paths.
+    try:
+        # We create a new path object here just for this check.
+        # This check is what Snyk *should* see as a sanitizer.
+        temp_path = Path(user_path_str)
+        if temp_path.is_absolute():
+            print(f"Error: Absolute paths are not allowed for {operation_name}.", file=sys.stderr)
+            print(f"Path Provided: {user_path_str}", file=sys.stderr)
+            print("Operation aborted for security.", file=sys.stderr)
+            sys.exit(1)
+    except Exception as e:
+        # Catch invalid path strings (e.g., with null bytes)
+        print(f"Error: Invalid path string for {operation_name}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # 2. Check for ".." components in the string itself.
+    path_components = user_path_str.split(os.sep)
+    if ".." in path_components:
+        print(f"Error: Path traversal components ('..') are not allowed for {operation_name}.", file=sys.stderr)
+        print(f"Path Provided: {user_path_str}", file=sys.stderr)
+        print("Operation aborted for security.", file=sys.stderr)
+        sys.exit(1)
+    # --- END EXPLICIT CHECKS ---
+
+    # 3. Get the trusted base directory.
+    cwd = Path.cwd().resolve()
+    
+    # 4. "Safely Join" the trusted base with the (now-checked) user path.
+    combined_path = cwd.joinpath(user_path_str)
+
+    # 5. Resolve the *combined* path. This cleans up 'foo/bar/../baz'
+    try:
+        resolved_path = combined_path.resolve()
+    except Exception as e:
+        print(f"Error: Could not resolve path for {operation_name}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # 6. Final, critical check: Ensure the *resolved* path is still inside the CWD.
+    try:
+        resolved_path.relative_to(cwd)
+    except ValueError:
+        print(f"Error: Path for {operation_name} is outside the current directory.", file=sys.stderr)
+        print(f"Resolved Path: {resolved_path}", file=sys.stderr)
+        print("Operation aborted for security.", file=sys.stderr)
+        sys.exit(1)
+        
+    if check_exists and not resolved_path.exists():
+        print(f"Error: Input file for {operation_name} not found.", file=sys.stderr)
+        print(f"Path: {resolved_path}", file=sys.stderr)
+        sys.exit(1)
+
+    return resolved_path
+
+
 def generate_secure_password(length: int) -> str:
     """Generates a cryptographically secure password between 10-20 characters."""
     if not 10 <= length <= 20:
-        # This is a safeguard, argparse should catch it first
         raise ValueError("Password length must be between 10 and 20 characters.")
         
-    # Using ASCII letters and digits for broad compatibility
     alphabet = string.ascii_letters + string.digits
     password = ''.join(secrets.choice(alphabet) for _ in range(length))
     return password
 
 def load_original_checksum(report_path: Path) -> tuple[str, str] | None:
-    """Reads the original checksum and algorithm from the JSON report."""
+    """Reads the original checksum and algorithm from the JSON report. (Receives validated path)"""
     try:
-        with open(report_path, 'r') as f:
+        with open(report_path, 'r') as f: # nosec B310 - Path is sanitized by validate_and_resolve_path
             report_data = json.load(f)
         
         checksum_data = report_data.get('original_checksum')
@@ -78,10 +141,10 @@ def load_original_checksum(report_path: Path) -> tuple[str, str] | None:
 
 
 def calculate_file_checksum(file_path: Path, chunk_size: int) -> str:
-    """Calculates the SHA-256 checksum of a file efficiently using streaming."""
+    """Calculates the SHA-256 checksum of a file efficiently. (Receives validated path)"""
     hasher = hashlib.sha256()
     try:
-        with open(file_path, 'rb') as f:
+        with open(file_path, 'rb') as f: # nosec B310 - Path is sanitized by validate_and_resolve_path
             while True:
                 chunk = f.read(chunk_size)
                 if not chunk:
@@ -128,8 +191,9 @@ def derive_key(password: str, salt: bytes, settings: dict) -> bytes:
 
 
 def generate_report(input_file: Path, output_file: Path, report_data: dict, generated_password: str | None = None) -> Path | None:
-    """Generates a JSON report, optionally adds a generated password, and returns the path."""
+    """Generates a JSON report. (Receives validated paths)"""
     
+    # This is safe as input_file is already a validated Path
     report_path = input_file.with_suffix(REPORT_FILE_SUFFIX)
     
     report_data['original_file'] = input_file.name
@@ -145,7 +209,8 @@ def generate_report(input_file: Path, output_file: Path, report_data: dict, gene
         report_data['nonce'] = report_data['nonce'].hex()
 
     try:
-        with open(report_path, 'w') as f:
+        # This open() is now safe as report_path is derived from a validated path
+        with open(report_path, 'w') as f: # nosec B310 - Path is sanitized by validate_and_resolve_path
             json.dump(report_data, f, indent=4)
         print(f"Report generated successfully: {report_path}")
         return report_path
@@ -154,22 +219,26 @@ def generate_report(input_file: Path, output_file: Path, report_data: dict, gene
         return None
 
 
-def encrypt_file(input_path: str, output_path: str, password: str, settings: dict, password_was_generated: bool = False):
+def encrypt_file(input_file: Path, output_file: Path | None, password: str, settings: dict, password_was_generated: bool = False):
     """
     Encrypts the file using AES-256-GCM, streaming data in chunks.
-    The output file format is: [HEADER][KDF_PARAMS][SALT][NONCE][CIPHERTEXT][TAG]
+    (input_file and output_file are pre-validated Path objects from main())
     """
     
-    input_file = Path(input_path).resolve()
-    
-    if not output_path:
+    # Use pre-validated output_file, or derive from pre-validated input_file
+    if not output_file:
         output_file = input_file.with_suffix(input_file.suffix + ENCRYPTED_FILE_SUFFIX)
-    else:
-        output_file = Path(output_path).resolve()
+
+    # --- Overwrite Protection ---
+    if output_file.exists():
+        answer = input(f"Warning: Output file '{output_file.name}' already exists. Overwrite? (y/N) ")
+        if answer.lower() != 'y':
+            print("Encryption aborted by user.", file=sys.stderr)
+            return
 
     print(f"Starting encryption of '{input_file.name}'...")
     
-    # 1. Calculate the checksum of the original file (Automatic)
+    # 1. Calculate the checksum (Safe, input_file is validated)
     original_checksum = calculate_file_checksum(input_file, CHUNK_SIZE)
     if not original_checksum:
         print("Error: Could not generate file checksum. Aborting encryption.", file=sys.stderr)
@@ -215,7 +284,8 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
 
     # 5. Write file components and stream data
     try:
-        with open(input_file, 'rb') as f_in, open(output_file, 'wb') as f_out:
+        # These file operations are now safe
+        with open(input_file, 'rb') as f_in, open(output_file, 'wb') as f_out: # nosec B310 - Paths are sanitized
             # Write all AAD components to the file for decryption to read
             f_out.write(FILE_VERSION_HEADER)
             f_out.write(kdf_params_header)
@@ -234,7 +304,7 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
             
         print(f"Encryption successful. Output: {output_file}")
         
-        # 6. Generate Report (Include checksum)
+        # 6. Generate Report (Safe, paths are validated)
         report_data = {
             'kdf_settings': settings, 
             'algorithm': 'AES-256-GCM', 
@@ -262,28 +332,26 @@ def encrypt_file(input_path: str, output_path: str, password: str, settings: dic
     except Exception as e:
         print(f"Error during file streaming: {e}", file=sys.stderr)
         if output_file.exists():
-            os.remove(output_file)
+            os.remove(output_file) # nosec B310 - Path is sanitized
         return
 
 
-def decrypt_file(input_path: str, output_path: str, password: str, verify_report_path: str | None, force_insecure: bool):
+def decrypt_file(input_file: Path, output_file: Path | None, verify_report_path: Path | None, password: str, force_insecure: bool):
     """
-    Handles the main decryption logic, using write-to-temp-then-rename for atomic decryption,
-    with an insecure override option for demonstration purposes.
+    Handles the main decryption logic.
+    (All path args are pre-validated Path objects from main())
     """
-    input_file = Path(input_path).resolve()
     
-    if not input_file.name.endswith(ENCRYPTED_FILE_SUFFIX):
-        print(f"Error: Decryption file must end with '{ENCRYPTED_FILE_SUFFIX}' suffix.", file=sys.stderr)
-        return
-        
-    if not output_path:
+    if not output_file:
+        # Safe, derived from validated input_file
         base_name = input_file.name.removesuffix(ENCRYPTED_FILE_SUFFIX)
         output_file = input_file.parent / base_name
     else:
-        output_file = Path(output_path).resolve()
+        # output_file is already a validated Path
+        pass 
         
-    temp_output_file = output_file.with_suffix(output_file.suffix + '.tmp')
+    # --- MODIFIED: Use tempfile ---
+    temp_file_path = None # Store path for cleanup
         
     print(f"Decrypting '{input_file.name}' to '{output_file}'...")
     
@@ -297,7 +365,8 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
     
     try:
         # --- File Header Read and Decryption Setup ---
-        with open(input_file, 'rb') as f_in:
+        # Safe, input_file is validated
+        with open(input_file, 'rb') as f_in: # nosec B310 - Path is sanitized
             # 1. Read and verify Header
             header = f_in.read(len(FILE_VERSION_HEADER))
             if header != FILE_VERSION_HEADER:
@@ -349,7 +418,10 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
             decryptor.authenticate_additional_data(aad)
             
             # 7. Stream file content and decrypt chunk by chunk
-            with open(temp_output_file, 'wb') as f_out: # Write to temp file
+            # --- MODIFIED: Use tempfile ---
+            with tempfile.NamedTemporaryFile(dir=output_file.parent, delete=False) as f_out:
+                temp_file_path = f_out.name # Store the random path
+                
                 bytes_to_read = tag_start_position - start_of_ciphertext
                 
                 while bytes_to_read > 0:
@@ -364,19 +436,40 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
                 # 8. Finalize the decryption (this verifies the GCM tag)
                 f_out.write(decryptor.finalize())
         
-        # 9. ATOMIC RENAME: Only rename the file if GCM tag verification succeeds
-        os.rename(temp_output_file, output_file)
+        # 9. ATOMIC RENAME: Only rename after GCM tag check
+        # --- Overwrite Protection ---
+        if output_file.exists():
+            answer = input(f"Warning: Output file '{output_file.name}' already exists. Overwrite? (y/N) ")
+            if answer.lower() != 'y':
+                print("Decryption aborted by user.", file=sys.stderr)
+                if temp_file_path and Path(temp_file_path).exists():
+                    os.remove(temp_file_path) # nosec B310 - Path is sanitized
+                return
+        
+        os.rename(temp_file_path, output_file) # nosec B310 - Paths are sanitized
+        temp_file_path = None # Set to None as rename was successful
         
         print(f"Decryption successful. Output: {output_file}")
         
-        # 10. AUTOMATIC CHECKSUM VERIFICATION (Unchanged)
-        if verify_report_path:
-            report_path = Path(verify_report_path).resolve()
-            original_data = load_original_checksum(report_path)
+        # 10. "SMART" CHECKSUM VERIFICATION
+        verify_path_to_check = verify_report_path # Use the pre-validated Path
+        
+        # If no verify flag was given, automatically check for a report
+        if not verify_path_to_check:
+            potential_report_path = input_file.with_suffix(REPORT_FILE_SUFFIX) # Safe
+            if potential_report_path.exists():
+                print(f"Found report: {potential_report_path.name}")
+                answer = input("Verify decrypted file against this report? (Y/n) ")
+                if answer.lower() != 'n':
+                    verify_path_to_check = potential_report_path # Use the safe, derived path
+
+        if verify_path_to_check:
+            # Path is already validated or derived from a validated path
+            original_data = load_original_checksum(verify_path_to_check) # Safe
             
             if original_data:
                 original_hash, algorithm = original_data
-                decrypted_hash = calculate_file_checksum(output_file, CHUNK_SIZE)
+                decrypted_hash = calculate_file_checksum(output_file, CHUNK_SIZE) # Safe
                 
                 print("\n--- Integrity Verification ---")
                 if decrypted_hash == original_hash:
@@ -390,35 +483,36 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
     except InvalidTag:
         # Check for the override flag here
         if force_insecure:
-            corrupt_output_file = Path(str(output_file) + CORRUPTION_SUFFIX)
+            corrupt_output_file = Path(str(output_file) + CORRUPTION_SUFFIX) # Safe
             
             print("\n" + "="*80)
             print("⚠️ SECURITY OVERRIDE ACTIVATED: Corrupted file saved.")
             print("The decryption tag failed. The output file is UNVERIFIED and LIKELY CORRUPTED.")
             print(f"Unverified output saved to: {corrupt_output_file}")
             print("="*80)
-            # Rename the temporary file to the new, corrupted filename (Skipping cleanup)
-            os.rename(temp_output_file, corrupt_output_file)
+            if temp_file_path and Path(temp_file_path).exists():
+                 os.rename(temp_file_path, corrupt_output_file) # nosec B310 - Paths are sanitized
+                 temp_file_path = None
             return
             
         print("Error: Decryption failed. Incorrect password or the file has been tampered with.", file=sys.stderr)
-        # Default security action: delete the partial, unverified file
-        if temp_output_file.exists():
-            os.remove(temp_output_file)
+        if temp_file_path and Path(temp_file_path).exists():
+            os.remove(temp_file_path) # nosec B310 - Path is sanitized
         return
     except FileNotFoundError:
         print(f"Error: Required file not found.", file=sys.stderr)
+        if temp_file_path and Path(temp_file_path).exists():
+            os.remove(temp_file_path) # nosec B310
         return
     except (struct.error, ValueError) as e:
         print(f"Error: File structure invalid or data missing ({e}).", file=sys.stderr)
-        # Default security action: delete the partial, unverified file
-        if temp_output_file.exists():
-            os.remove(temp_output_file)
+        if temp_file_path and Path(temp_file_path).exists():
+            os.remove(temp_file_path) # nosec B310 - Path is sanitized
         return
     except Exception as e:
         print(f"An unexpected error occurred during decryption: {e}", file=sys.stderr)
-        if temp_output_file.exists():
-            os.remove(temp_output_file)
+        if temp_file_path and Path(temp_file_path).exists():
+            os.remove(temp_file_path) # nosec B310 - Path is sanitized
         return
 
 # ----------------------------------------------------------------
@@ -428,38 +522,43 @@ def decrypt_file(input_path: str, output_path: str, password: str, verify_report
 def main():
     parser = argparse.ArgumentParser(
         description="A secure, cross-platform CLI tool for file encryption.",
-        # --- MODIFIED SECTION ---
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
 
   # 1. Encrypt a file (Easy Button - you will be prompted for a password)
-  python encrypt_app.py --encrypt "my_sensitive_data.pdf"
+  python encrypt_app.py -e "my_sensitive_data.pdf"
 
   # 2. Decrypt a file (you will be prompted for a password)
-  python encrypt_app.py --decrypt "my_sensitive_data.pdf.enc"
+  python encrypt_app.py -d "my_sensitive_data.pdf.enc"
 
-  # 3. Decrypt and verify integrity against the original report
-  python encrypt_app.py --decrypt "file.enc" --verify-report-path "file.report.json"
+  # 3. Decrypt and verify integrity (auto-finds report)
+  python encrypt_app.py -d "file.enc"
+  # (If 'file.report.json' exists, it will ask to verify)
 
-  # 4. Encrypt using a generated password (WARNING: Password saved in .report.json)
-  python encrypt_app.py --encrypt "file.txt" --generate-password
+  # 4. Decrypt and specify verification report path
+  python encrypt_app.py -d "file.enc" -v "file.report.json"
+
+  # 5. Encrypt using a generated password (WARNING: Password saved in .report.json)
+  python encrypt_app.py -e "file.txt" -g
   
-  # 5. Encrypt using a generated password of a specific length (10-20)
-  python encrypt_app.py --encrypt "file.txt" --generate-password 20
+  # 6. Encrypt using a generated password of a specific length (10-20)
+  python encrypt_app.py -e "file.txt" -g 20
+
+  # 7. Encrypt using a password from a script (advanced)
+  echo "MySuperSecretP@ssword" | python encrypt_app.py -e "file.txt" --password-stdin
 """
-        # --- END MODIFICATION ---
     )
     
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
-        '--encrypt',
+        '-e', '--encrypt',
         metavar='FILE',
         type=str,
         help='Encrypt the specified file using secure defaults.'
     )
     group.add_argument(
-        '--decrypt',
+        '-d', '--decrypt',
         metavar='FILE.enc',
         type=str,
         help='Decrypt the specified encrypted file.'
@@ -472,28 +571,32 @@ Examples:
     )
     
     parser.add_argument(
-        '--verify-report-path',
+        '-v', '--verify-report-path',
         type=str,
-        help='(Decrypt Only) Path to the JSON report file to automatically verify the decrypted file\'s hash against the original file\'s hash.'
+        help='(Decrypt Only) Path to the JSON report file to manually verify the decrypted file\'s hash.'
     )
     
-    # NEW INSECURE FLAG
     parser.add_argument(
-        '--force-insecure-decrypt',
-        action='store_true',
-        help='(Decrypt Only) WARNING: Bypasses GCM integrity check on failure. Writes UNVERIFIED, potentially corrupted data to the output file.'
-    )
-
-    # NEW PASSWORD GENERATOR FLAG
-    parser.add_argument(
-        '--generate-password',
-        nargs='?',                 # Makes the value optional
-        const=18,                  # Default length if flag is present with no value
+        '-g', '--generate-password',
+        nargs='?',
+        const=18,
         type=int,
-        choices=range(10, 21),     # Enforces 10-20 character limit
+        choices=range(10, 21),
         metavar='LENGTH',
         help='(Encrypt Only) Generate a secure password and save it in the report file. '
              'Default length is 18 if no length is specified. (Range: 10-20)'
+    )
+    
+    parser.add_argument(
+        '--password-stdin',
+        action='store_true',
+        help='(Advanced) Read password from stdin instead of prompting.'
+    )
+
+    parser.add_argument(
+        '--force-insecure-decrypt',
+        action='store_true',
+        help='(Decrypt Only) WARNING: Bypasses GCM integrity check on failure. Writes UNVERIFIED, potentially corrupted data.'
     )
 
     custom_settings_group = parser.add_argument_group(
@@ -526,24 +629,40 @@ Examples:
     password_was_generated = False
     
     if args.generate_password and not args.encrypt:
-        print("Error: --generate-password can only be used with --encrypt.", file=sys.stderr)
+        print("Error: -g/--generate-password can only be used with -e/--encrypt.", file=sys.stderr)
+        sys.exit(1)
+
+    if args.password_stdin and args.generate_password:
+        print("Error: --password-stdin and -g/--generate-password cannot be used together.", file=sys.stderr)
         sys.exit(1)
 
     if args.encrypt:
         if args.generate_password:
-            # Use the provided length, or the const (18) if none was given
-            pw_length = args.generate-password
+            pw_length = args.generate_password
             password = generate_secure_password(pw_length)
             password_was_generated = True
             print(f"Generating new {pw_length}-character password...")
+        elif args.password_stdin:
+            print("Reading password from stdin...", file=sys.stderr)
+            password = sys.stdin.readline().strip()
+            if len(password) < MIN_PASSWORD_LENGTH:
+                 print(f"Error: Password from stdin must be at least {MIN_PASSWORD_LENGTH} characters.", file=sys.stderr)
+                 sys.exit(1)
         else:
             password = get_verified_password()
             
     elif args.decrypt:
-        password = getpass("Enter password: ")
-        if len(password) < MIN_PASSWORD_LENGTH:
-            print(f"Error: Decryption password must be at least {MIN_PASSWORD_LENGTH} characters long.", file=sys.stderr)
-            sys.exit(1)
+        if args.password_stdin:
+            print("Reading password from stdin...", file=sys.stderr)
+            password = sys.stdin.readline().strip()
+            if not password:
+                 print("Error: Password from stdin cannot be empty.", file=sys.stderr)
+                 sys.exit(1)
+        else:
+            password = getpass("Enter password: ")
+            if len(password) < MIN_PASSWORD_LENGTH:
+                print(f"Error: Decryption password must be at least {MIN_PASSWORD_LENGTH} characters long.", file=sys.stderr)
+                sys.exit(1)
     # --- End Updated Logic ---
 
     # Combine KDF settings
@@ -552,10 +671,27 @@ Examples:
     kdf_settings['iterations'] = args.kdf_time
     kdf_settings['lanes'] = args.kdf_parallelism
 
+    # --- VALIDATE ALL PATHS IN MAIN ---
+    encrypt_input_path = None
+    decrypt_input_path = None
+    
     if args.encrypt:
-        encrypt_file(args.encrypt, args.output, password, kdf_settings, password_was_generated=password_was_generated)
+        encrypt_input_path = validate_and_resolve_path(args.encrypt, "encrypt input", check_exists=True)
     elif args.decrypt:
-        decrypt_file(args.decrypt, args.output, password, args.verify_report_path, args.force_insecure_decrypt)
+        decrypt_input_path = validate_and_resolve_.path(args.decrypt, "decrypt input", check_exists=True)
+
+    # Validate optional paths
+    output_path = validate_and_resolve_path(args.output, "output", check_exists=False)
+    verify_path = validate_and_resolve_path(args.verify_report_path, "verify report", check_exists=False)
+    # --- END VALIDATION ---
+
+
+    # --- Pass validated Path objects ---
+    if args.encrypt:
+        encrypt_file(encrypt_input_path, output_path, password, kdf_settings, password_was_generated=password_was_generated)
+        
+    elif args.decrypt:
+        decrypt_file(decrypt_input_path, output_path, verify_path, password, args.force_insecure_decrypt)
 
 
 if __name__ == '__main__':

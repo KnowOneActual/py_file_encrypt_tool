@@ -156,3 +156,15 @@ raycast
 fzf
 history.txt
 
+# ========================
+# Ignore tool output
+# ========================
+# Ignore all encrypted files
+*.enc
+
+# Ignore all report files (may contain hashes or passwords)
+*.report.json
+
+# Ignore all partially decrypted or corrupt files
+*.tmp
+*.unverified_corrupt
